@@ -1,6 +1,6 @@
 [![header](./banner.png)](https://aar.one)
 
-# Oi, World! I'm Mohamed aahmed 👋
+# Hello, World! I'm Mohamed aahmed 👋
 
 ![Profile views](https://komarev.com/ghpvc/?username=ahrwn&label=Profile%20views&color=60598F&style=flat)
 
