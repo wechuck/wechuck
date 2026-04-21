@@ -2,6 +2,7 @@
 #define __WECHUCK_RISK_MANAGER_MQH__
 
 #define LOSS_STREAK_LOOKBACK_DAYS 5
+#define MIN_DAY_START_BALANCE 0.01
 
 class CRiskManager
 {
@@ -155,7 +156,7 @@ public:
       double dayPnl = ClosedPnlToday("");
       double balance = AccountInfoDouble(ACCOUNT_BALANCE);
       double dayStartBalance = (balance - dayPnl);
-      if(dayStartBalance <= DBL_EPSILON)
+      if(dayStartBalance < MIN_DAY_START_BALANCE)
       {
          reason = "Invalid day-start balance for daily guard calculation";
          return false;
