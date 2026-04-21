@@ -27,7 +27,8 @@ input int InpEmaSlow = 200;
 input int InpStructureLookback = 10;
 
 input group "Entry Score (M1)"
-input int InpScoreThreshold = 5;
+input int  InpScoreThreshold            = 3;
+input bool InpRequireStructureAlignment = false;
 input int InpAdxPeriod = 14;
 input int InpZscorePeriod = 20;
 input double InpZscoreThreshold = 1.5;
@@ -38,14 +39,22 @@ input int InpBreakoutBars = 5;
 input int InpVolumeMAPeriod = 20;
 
 input group "Risk Guards"
-input int InpMinSecondsBetweenEntries = 60;
-input int InpMaxTradesPerSymbolPerHour = 5;
-input int InpMaxOpenPositionsGlobal = 2;
-input int InpConsecutiveLossPauseCount = 3;
-input int InpConsecutiveLossPauseMinutes = 60;
-input double InpDailyLossCapPct = 3.0;
-input bool InpUseDailyProfitStop = false;
-input double InpDailyProfitStopPct = 3.0;
+input int    InpMinSecondsBetweenEntries    = 10;
+input int    InpMaxTradesPerSymbolPerHour   = 15;
+input int    InpMaxOpenPositionsGlobal      = 3;
+input int    InpConsecutiveLossPauseCount   = 3;
+input int    InpConsecutiveLossPauseMinutes = 30;
+input double InpDailyLossCapHighPct         = 5.0;
+input double InpDailyLossCapLowPct          = 2.0;
+input bool   InpUseDailyProfitStop          = false;
+input double InpDailyProfitStopPct          = 3.0;
+
+input group "Risk Sizing"
+input bool   InpUseDynamicLot    = true;
+input double InpRiskPctPerTrade  = 1.0;
+input double InpRiskPctFloor     = 0.3;
+input double InpEquityScaleStart = 300.0;
+input double InpEquityScaleFull  = 5000.0;
 
 input group "Stops and Targets"
 input double InpForexSlPips = 8.0;
@@ -75,12 +84,13 @@ bool IsAllowedSymbol(const string symbol)
            StringFind(symbol, "GBPAUD") >= 0 ||
            StringFind(symbol, "AUDNZD") >= 0 ||
            StringFind(symbol, "AUDJPY") >= 0 ||
-           StringFind(symbol, "XAUUSD") >= 0);
+           StringFind(symbol, "XAUUSD") >= 0 ||
+           StringFind(symbol, "GOLD")   >= 0);
 }
 
 bool IsGold(const string symbol)
 {
-   return (StringFind(symbol, "XAU") >= 0);
+   return (StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0);
 }
 
 int ForexPipsToPoints(const string symbol, const double pips)
@@ -135,6 +145,53 @@ bool CheckSpreadOk(const string symbol, int &spreadPts)
 bool PositionExistsForSymbol(const string symbol)
 {
    return PositionSelect(symbol);
+}
+
+double LinearScaleEquity(const double equity, const double hiVal, const double loVal)
+{
+   if(InpEquityScaleStart <= 0.0 || InpEquityScaleFull <= InpEquityScaleStart) return hiVal;
+   if(equity <= InpEquityScaleStart) return hiVal;
+   if(equity >= InpEquityScaleFull)  return loVal;
+   double t = (equity - InpEquityScaleStart) / (InpEquityScaleFull - InpEquityScaleStart);
+   return MathMax(hiVal - t * (hiVal - loVal), loVal);
+}
+
+double GetScaledRiskPct(const double equity)
+{
+   if(!InpUseDynamicLot) return InpRiskPctPerTrade;
+   return LinearScaleEquity(equity, InpRiskPctPerTrade, InpRiskPctFloor);
+}
+
+double GetScaledDailyLossCapPct(const double equity)
+{
+   return LinearScaleEquity(equity, InpDailyLossCapHighPct, InpDailyLossCapLowPct);
+}
+
+double ComputeLotSize(const string symbol)
+{
+   if(!InpUseDynamicLot) return InpFixedLot;
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double riskPct = GetScaledRiskPct(equity);
+   double riskAmount = equity * riskPct / 100.0;
+   double point     = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   double tickSize  = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tickValue = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+   int slPoints = IsGold(symbol) ? InpGoldSlPoints : ForexPipsToPoints(symbol, InpForexSlPips);
+   if(tickSize <= 0.0 || point <= 0.0) return InpFixedLot;
+   double pointValuePerLot = (point / tickSize) * tickValue;
+   if(pointValuePerLot <= 0.0) return InpFixedLot;
+   double slValue = slPoints * pointValuePerLot;
+   if(slValue <= 0.0) return InpFixedLot;
+   double rawLot    = riskAmount / slValue;
+   double minVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   double maxVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+   double stepVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   if(stepVolume <= 0.0) stepVolume = (minVolume > 0.0 ? minVolume : 0.01);
+   double lot = MathFloor(rawLot / stepVolume) * stepVolume;
+   double safeMin = (minVolume > 0.0 ? minVolume : 0.01);
+   double safeMax = (maxVolume > 0.0 ? maxVolume : 100.0);
+   lot = MathMax(safeMin, MathMin(lot, safeMax));
+   return NormalizeDouble(lot, 2);
 }
 
 void ManageOpenPosition(const string symbol)
@@ -198,13 +255,14 @@ void TryEntry(const string symbol)
    if(g_orderInFlight) return;
 
    string reason;
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    if(!g_risk.CanTradeNow(symbol,
                           InpMinSecondsBetweenEntries,
                           InpMaxTradesPerSymbolPerHour,
                           InpMaxOpenPositionsGlobal,
                           InpConsecutiveLossPauseCount,
                           InpConsecutiveLossPauseMinutes,
-                          InpDailyLossCapPct,
+                          GetScaledDailyLossCapPct(equity),
                           InpUseDailyProfitStop,
                           InpDailyProfitStopPct,
                           reason))
@@ -241,8 +299,16 @@ void TryEntry(const string symbol)
 
    if(bias.direction == DIR_NONE)
    {
-      g_logger.LogDecision(symbol, false, "No aligned M15 direction");
-      return;
+      if(!InpRequireStructureAlignment)
+      {
+         if(bias.emaBull)      bias.direction = DIR_BUY;
+         else if(bias.emaBear) bias.direction = DIR_SELL;
+      }
+      if(bias.direction == DIR_NONE)
+      {
+         g_logger.LogDecision(symbol, false, "No aligned M15 direction");
+         return;
+      }
    }
 
    EntryScoreBreakdown score;
@@ -294,7 +360,8 @@ void TryEntry(const string symbol)
    double tp = (bias.direction == DIR_BUY) ? price + tpDistancePoints * point : price - tpDistancePoints * point;
 
    g_orderInFlight = true;
-   bool opened = g_exec.Open(symbol, bias.direction, InpFixedLot, InpMaxDeviationPoints, InpOrderRetries, sl, tp, g_logger);
+   double lotSize = ComputeLotSize(symbol);
+   bool opened = g_exec.Open(symbol, bias.direction, lotSize, InpMaxDeviationPoints, InpOrderRetries, sl, tp, g_logger);
    g_orderInFlight = false;
 
    if(opened)
