@@ -1,6 +1,8 @@
 #ifndef __WECHUCK_RISK_MANAGER_MQH__
 #define __WECHUCK_RISK_MANAGER_MQH__
 
+#define LOSS_STREAK_LOOKBACK_DAYS 5
+
 class CRiskManager
 {
 private:
@@ -76,7 +78,7 @@ public:
    {
       reason = "";
       datetime nowTime = TimeCurrent();
-      datetime fromTime = nowTime - 86400 * 5;
+      datetime fromTime = nowTime - 86400 * LOSS_STREAK_LOOKBACK_DAYS;
       if(!HistorySelect(fromTime, nowTime)) return false;
 
       int totalDeals = (int)HistoryDealsTotal();

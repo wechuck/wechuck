@@ -3,6 +3,13 @@
 
 #include "Types.mqh"
 
+#define ADX_THRESHOLD_LOW 20.0
+#define ADX_THRESHOLD_HIGH 30.0
+#define ADX_EXIT_WEAK_THRESHOLD 18.0
+#define ZSCORE_ENTRY_WEIGHT 2
+#define ZSCORE_NORMALIZATION_EXIT 0.2
+#define VOLUME_SPIKE_MULTIPLIER 1.5
+
 class CEntryScoring
 {
 private:
@@ -54,8 +61,8 @@ public:
          ArraySetAsSeries(adxMain, true);
          if(CopyBuffer(adx, 0, 1, 1, adxMain) >= 1)
          {
-            if(adxMain[0] > 30.0) outScore.adx = 2;
-            else if(adxMain[0] > 20.0) outScore.adx = 1;
+            if(adxMain[0] > ADX_THRESHOLD_HIGH) outScore.adx = 2;
+            else if(adxMain[0] > ADX_THRESHOLD_LOW) outScore.adx = 1;
          }
          IndicatorRelease(adx);
       }
@@ -79,8 +86,8 @@ public:
          if(stddev > 0.0)
          {
             double z = (closeBuf[0] - mean) / stddev;
-            if(direction == DIR_BUY && z <= -zscoreThreshold) outScore.zscore = 2;
-            if(direction == DIR_SELL && z >= zscoreThreshold) outScore.zscore = 2;
+            if(direction == DIR_BUY && z <= -zscoreThreshold) outScore.zscore = ZSCORE_ENTRY_WEIGHT;
+            if(direction == DIR_SELL && z >= zscoreThreshold) outScore.zscore = ZSCORE_ENTRY_WEIGHT;
          }
       }
 
@@ -112,7 +119,7 @@ public:
          double avg = 0.0;
          for(int i = 1; i <= volumeMaPeriod; i++) avg += (double)vol[i];
          avg /= volumeMaPeriod;
-         if(avg > 0.0 && (double)vol[0] > 1.5 * avg) outScore.volume = 1;
+         if(avg > 0.0 && (double)vol[0] > VOLUME_SPIKE_MULTIPLIER * avg) outScore.volume = 1;
       }
 
       outScore.total = outScore.adx + outScore.zscore + outScore.stoch + outScore.breakout + outScore.volume;
@@ -147,7 +154,7 @@ public:
          if(stddev > 0.0)
          {
             double z = (closeBuf[0] - mean) / stddev;
-            zNorm = (MathAbs(z) < 0.2);
+            zNorm = (MathAbs(z) < ZSCORE_NORMALIZATION_EXIT);
          }
       }
 
@@ -158,7 +165,7 @@ public:
          double adxMain[1];
          ArraySetAsSeries(adxMain, true);
          if(CopyBuffer(adx, 0, 1, 1, adxMain) >= 1)
-            weakAdx = (adxMain[0] < 18.0);
+            weakAdx = (adxMain[0] < ADX_EXIT_WEAK_THRESHOLD);
          IndicatorRelease(adx);
       }
 
