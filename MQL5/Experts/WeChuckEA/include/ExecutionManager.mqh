@@ -48,6 +48,7 @@ public:
    {
       MqlTick tick;
       if(!SymbolInfoTick(symbol, tick)) return false;
+      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
 
       double price = (direction == DIR_BUY) ? tick.ask : tick.bid;
       ValidateStops(symbol, direction, price, sl, tp);
@@ -65,8 +66,8 @@ public:
          long retcode = m_trade.ResultRetcode();
          long latency = (long)(GetTickCount() - start);
          double fill = m_trade.ResultPrice();
-         double slippagePoints = (fill > 0.0 ? MathAbs(fill - price) / SymbolInfoDouble(symbol, SYMBOL_POINT) : 0.0);
-         int spreadPts = (int)((tick.ask - tick.bid) / SymbolInfoDouble(symbol, SYMBOL_POINT));
+         double slippagePoints = (fill > 0.0 ? MathAbs(fill - price) / point : 0.0);
+         int spreadPts = (int)((tick.ask - tick.bid) / point);
          logger.LogExecution(symbol, "open", retcode, spreadPts, slippagePoints, latency);
 
          if(ok) return true;
@@ -80,8 +81,9 @@ public:
    {
       MqlTick tick;
       SymbolInfoTick(symbol, tick);
+      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
       bool ok = m_trade.PositionClose(symbol);
-      logger.LogExecution(symbol, "close", m_trade.ResultRetcode(), (int)((tick.ask - tick.bid) / SymbolInfoDouble(symbol, SYMBOL_POINT)), 0.0, 0);
+      logger.LogExecution(symbol, "close", m_trade.ResultRetcode(), (int)((tick.ask - tick.bid) / point), 0.0, 0);
       return ok;
    }
 

@@ -87,7 +87,7 @@ public:
          {
             double z = (closeBuf[0] - mean) / stddev;
             if(direction == DIR_BUY && z <= -zscoreThreshold) outScore.zscore = ZSCORE_ENTRY_WEIGHT;
-            if(direction == DIR_SELL && z >= zscoreThreshold) outScore.zscore = ZSCORE_ENTRY_WEIGHT;
+            else if(direction == DIR_SELL && z >= zscoreThreshold) outScore.zscore = ZSCORE_ENTRY_WEIGHT;
          }
       }
 
@@ -108,7 +108,7 @@ public:
          }
 
          if(direction == DIR_BUY && rates[1].close > hh) outScore.breakout = 1;
-         if(direction == DIR_SELL && rates[1].close < ll) outScore.breakout = 1;
+         else if(direction == DIR_SELL && rates[1].close < ll) outScore.breakout = 1;
       }
 
       long vol[];
