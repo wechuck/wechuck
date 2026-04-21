@@ -86,8 +86,8 @@ public:
          if(stddev > 0.0)
          {
             double z = (closeBuf[0] - mean) / stddev;
-            if(direction == DIR_BUY && z <= -zscoreThreshold) outScore.zscore = ZSCORE_ENTRY_WEIGHT;
-            else if(direction == DIR_SELL && z >= zscoreThreshold) outScore.zscore = ZSCORE_ENTRY_WEIGHT;
+            if(direction == DIR_BUY && z >= zscoreThreshold) outScore.zscore = ZSCORE_ENTRY_WEIGHT;
+            else if(direction == DIR_SELL && z <= -zscoreThreshold) outScore.zscore = ZSCORE_ENTRY_WEIGHT;
          }
       }
 
@@ -128,7 +128,7 @@ public:
       return true;
    }
 
-   bool ShouldExitByDynamics(const string symbol, const int positionDirection, const int adxPeriod, const int stochK, const int stochD, const int stochSlowing, const int zscorePeriod)
+   bool ShouldExitByDynamics(const string symbol, const int positionDirection, const int stochK, const int stochD, const int stochSlowing, const int zscorePeriod)
    {
       int opposite = (positionDirection == DIR_BUY ? DIR_SELL : DIR_BUY);
       bool cross = false;
@@ -158,18 +158,7 @@ public:
          }
       }
 
-      bool weakAdx = false;
-      int adx = iADX(symbol, PERIOD_M1, adxPeriod);
-      if(adx != INVALID_HANDLE)
-      {
-         double adxMain[1];
-         ArraySetAsSeries(adxMain, true);
-         if(CopyBuffer(adx, 0, 1, 1, adxMain) >= 1)
-            weakAdx = (adxMain[0] < ADX_EXIT_WEAK_THRESHOLD);
-         IndicatorRelease(adx);
-      }
-
-      return (stochExit || zNorm || weakAdx);
+      return (stochExit || zNorm);
    }
 };
 

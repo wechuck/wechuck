@@ -27,7 +27,7 @@ input int InpEmaSlow = 200;
 input int InpStructureLookback = 10;
 
 input group "Entry Score (M1)"
-input int  InpScoreThreshold            = 3;
+input int  InpScoreThreshold            = 4;
 input bool InpRequireStructureAlignment = false;
 input int InpAdxPeriod = 14;
 input int InpZscorePeriod = 20;
@@ -210,7 +210,9 @@ void ManageOpenPosition(const string symbol)
       return;
    }
 
-   if(g_scoring.ShouldExitByDynamics(symbol, dir, InpAdxPeriod, InpStochK, InpStochD, InpStochSlowing, InpZscorePeriod))
+   double posProfit = PositionGetDouble(POSITION_PROFIT);
+   if(posProfit > 0.0 &&
+      g_scoring.ShouldExitByDynamics(symbol, dir, InpStochK, InpStochD, InpStochSlowing, InpZscorePeriod))
    {
       g_logger.LogDecision(symbol, false, "Dynamic exit condition");
       g_exec.CloseSymbolPosition(symbol, g_logger);
