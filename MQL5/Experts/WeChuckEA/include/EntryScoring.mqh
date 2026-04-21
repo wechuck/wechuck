@@ -59,9 +59,9 @@ public:
       int adxHandle = iADX(symbol, PERIOD_M1, adxPeriod);
       if(adxHandle != INVALID_HANDLE)
       {
-         double adxBuf[2];
+         double adxBuf[1];
          ArraySetAsSeries(adxBuf, true);
-         if(CopyBuffer(adxHandle, 0, 1, 2, adxBuf) >= 2)
+         if(CopyBuffer(adxHandle, 0, 1, 1, adxBuf) >= 1)
          {
             double adxVal = adxBuf[0];
             if(adxVal >= adxThresholdHigh)      outScore.adx = 2;
@@ -141,9 +141,9 @@ public:
       int adxHandle = iADX(symbol, PERIOD_M1, adxPeriod);
       if(adxHandle != INVALID_HANDLE)
       {
-         double adxBuf[2];
+         double adxBuf[1];
          ArraySetAsSeries(adxBuf, true);
-         if(CopyBuffer(adxHandle, 0, 1, 2, adxBuf) >= 2)
+         if(CopyBuffer(adxHandle, 0, 1, 1, adxBuf) >= 1)
             adxWeak = (adxBuf[0] < adxExitWeakThreshold);
          IndicatorRelease(adxHandle);
       }
