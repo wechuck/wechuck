@@ -37,6 +37,8 @@ public:
    bool Evaluate(const string symbol,
                  const int direction,
                  const int adxPeriod,
+                 const double adxThresholdLow,
+                 const double adxThresholdHigh,
                  const int zscorePeriod,
                  const double zscoreThreshold,
                  const int stochK,
@@ -54,7 +56,19 @@ public:
       outScore.total = 0;
       outScore.details = "";
 
-      outScore.adx = 2;
+      int adxHandle = iADX(symbol, PERIOD_M1, adxPeriod);
+      if(adxHandle != INVALID_HANDLE)
+      {
+         double adxBuf[2];
+         ArraySetAsSeries(adxBuf, true);
+         if(CopyBuffer(adxHandle, 0, 1, 2, adxBuf) >= 2)
+         {
+            double adxVal = adxBuf[0];
+            if(adxVal >= adxThresholdHigh)      outScore.adx = 2;
+            else if(adxVal >= adxThresholdLow)  outScore.adx = 1;
+         }
+         IndicatorRelease(adxHandle);
+      }
 
       double closeBuf[];
       ArrayResize(closeBuf, zscorePeriod + 2);
@@ -117,11 +131,22 @@ public:
       return true;
    }
 
-   bool ShouldExitByDynamics(const string symbol, const int positionDirection, const int stochK, const int stochD, const int stochSlowing, const int zscorePeriod)
+   bool ShouldExitByDynamics(const string symbol, const int positionDirection, const int stochK, const int stochD, const int stochSlowing, const int zscorePeriod, const int adxPeriod, const double adxExitWeakThreshold)
    {
       int opposite = (positionDirection == DIR_BUY ? DIR_SELL : DIR_BUY);
       bool cross = false;
       bool stochExit = StochCross(symbol, opposite, stochK, stochD, stochSlowing, cross) && cross;
+
+      bool adxWeak = false;
+      int adxHandle = iADX(symbol, PERIOD_M1, adxPeriod);
+      if(adxHandle != INVALID_HANDLE)
+      {
+         double adxBuf[2];
+         ArraySetAsSeries(adxBuf, true);
+         if(CopyBuffer(adxHandle, 0, 1, 2, adxBuf) >= 2)
+            adxWeak = (adxBuf[0] < adxExitWeakThreshold);
+         IndicatorRelease(adxHandle);
+      }
 
       bool zNorm = false;
       double closeBuf[];
@@ -147,7 +172,7 @@ public:
          }
       }
 
-      return (stochExit || zNorm);
+      return (stochExit || zNorm || adxWeak);
    }
 };
 

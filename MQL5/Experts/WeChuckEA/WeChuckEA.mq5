@@ -31,6 +31,9 @@ input int  InpScoreThreshold            = 4;
 input bool InpRequireStructureAlignment = false;
 input bool InpInvertDirection           = true;
 input int InpAdxPeriod = 14;
+input double InpAdxThresholdLow = 20.0;
+input double InpAdxThresholdHigh = 30.0;
+input double InpAdxExitWeakThreshold = 18.0;
 input int InpZscorePeriod = 20;
 input double InpZscoreThreshold = 1.5;
 input int InpStochK = 14;
@@ -213,7 +216,7 @@ void ManageOpenPosition(const string symbol)
 
    double posProfit = PositionGetDouble(POSITION_PROFIT);
    if(posProfit > 0.0 &&
-      g_scoring.ShouldExitByDynamics(symbol, dir, InpStochK, InpStochD, InpStochSlowing, InpZscorePeriod))
+      g_scoring.ShouldExitByDynamics(symbol, dir, InpStochK, InpStochD, InpStochSlowing, InpZscorePeriod, InpAdxPeriod, InpAdxExitWeakThreshold))
    {
       g_logger.LogDecision(symbol, false, "Dynamic exit condition");
       g_exec.CloseSymbolPosition(symbol, g_logger);
@@ -321,6 +324,8 @@ void TryEntry(const string symbol)
    if(!g_scoring.Evaluate(symbol,
                           bias.direction,
                           InpAdxPeriod,
+                          InpAdxThresholdLow,
+                          InpAdxThresholdHigh,
                           InpZscorePeriod,
                           InpZscoreThreshold,
                           InpStochK,
