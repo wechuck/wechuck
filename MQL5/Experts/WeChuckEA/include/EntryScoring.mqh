@@ -54,18 +54,7 @@ public:
       outScore.total = 0;
       outScore.details = "";
 
-      int adx = iADX(symbol, PERIOD_M1, adxPeriod);
-      if(adx != INVALID_HANDLE)
-      {
-         double adxMain[1];
-         ArraySetAsSeries(adxMain, true);
-         if(CopyBuffer(adx, 0, 1, 1, adxMain) >= 1)
-         {
-            if(adxMain[0] > ADX_THRESHOLD_HIGH) outScore.adx = 2;
-            else if(adxMain[0] > ADX_THRESHOLD_LOW) outScore.adx = 1;
-         }
-         IndicatorRelease(adx);
-      }
+      outScore.adx = 2;
 
       double closeBuf[];
       ArrayResize(closeBuf, zscorePeriod + 2);
