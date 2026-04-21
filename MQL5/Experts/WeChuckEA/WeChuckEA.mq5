@@ -11,7 +11,7 @@
 
 input group "General"
 input long   InpMagicNumber = 20260421;
-input double InpFixedLot = 0.10;
+input double InpFixedLot = 0.01;
 input bool   InpDebugMode = true;
 
 input group "Spread and Session"
@@ -71,7 +71,11 @@ bool g_orderInFlight = false;
 
 bool IsAllowedSymbol(const string symbol)
 {
-   return (symbol == "EURUSD" || symbol == "GBPAUD" || symbol == "AUDNZD" || symbol == "AUDJPY" || symbol == "XAUUSD");
+   return (StringFind(symbol, "EURUSD") >= 0 ||
+           StringFind(symbol, "GBPAUD") >= 0 ||
+           StringFind(symbol, "AUDNZD") >= 0 ||
+           StringFind(symbol, "AUDJPY") >= 0 ||
+           StringFind(symbol, "XAUUSD") >= 0);
 }
 
 bool IsGold(const string symbol)

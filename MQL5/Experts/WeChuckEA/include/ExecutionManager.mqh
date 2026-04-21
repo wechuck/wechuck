@@ -51,17 +51,41 @@ public:
       double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
 
       double price = (direction == DIR_BUY) ? tick.ask : tick.bid;
+      double minVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+      double maxVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+      double stepVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+      if(stepVolume <= 0.0) stepVolume = minVolume;
+
+      double requestedVolume = MathMax(volume, minVolume);
+      double normalizedVolume = MathFloor(requestedVolume / stepVolume) * stepVolume;
+      normalizedVolume = MathMax(minVolume, MathMin(normalizedVolume, maxVolume));
+      normalizedVolume = NormalizeDouble(normalizedVolume, 2);
+      if(normalizedVolume <= 0.0) return false;
+
+      ENUM_ORDER_TYPE orderType = (direction == DIR_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      double requiredMargin = 0.0;
+      if(OrderCalcMargin(orderType, symbol, normalizedVolume, price, requiredMargin))
+      {
+         double freeMargin = AccountInfoDouble(ACCOUNT_FREEMARGIN);
+         if(requiredMargin > freeMargin)
+         {
+            int spreadPts = (int)((tick.ask - tick.bid) / point);
+            logger.LogExecution(symbol, "open", TRADE_RETCODE_NO_MONEY, spreadPts, 0.0, 0);
+            return false;
+         }
+      }
+
       ValidateStops(symbol, direction, price, sl, tp);
       m_trade.SetDeviationInPoints(maxDeviationPoints);
 
       for(int i = 0; i < retries; i++)
       {
          ulong start = GetTickCount();
-         bool ok = false;
-         if(direction == DIR_BUY)
-            ok = m_trade.Buy(volume, symbol, 0.0, sl, tp, "WeChuck buy");
-         else if(direction == DIR_SELL)
-            ok = m_trade.Sell(volume, symbol, 0.0, sl, tp, "WeChuck sell");
+          bool ok = false;
+          if(direction == DIR_BUY)
+            ok = m_trade.Buy(normalizedVolume, symbol, 0.0, sl, tp, "WeChuck buy");
+          else if(direction == DIR_SELL)
+            ok = m_trade.Sell(normalizedVolume, symbol, 0.0, sl, tp, "WeChuck sell");
 
          long retcode = m_trade.ResultRetcode();
          long latency = (long)(GetTickCount() - start);
@@ -70,9 +94,10 @@ public:
          int spreadPts = (int)((tick.ask - tick.bid) / point);
          logger.LogExecution(symbol, "open", retcode, spreadPts, slippagePoints, latency);
 
-         if(ok) return true;
-         Sleep(100 + (i * 150));
-         SymbolInfoTick(symbol, tick);
+          if(ok) return true;
+          if(retcode == TRADE_RETCODE_NO_MONEY) return false;
+          Sleep(100 + (i * 150));
+          SymbolInfoTick(symbol, tick);
       }
       return false;
    }
