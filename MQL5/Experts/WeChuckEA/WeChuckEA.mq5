@@ -29,7 +29,7 @@ input int InpStructureLookback = 10;
 input group "Entry Score (M1)"
 input int  InpScoreThreshold            = 4;
 input bool InpRequireStructureAlignment = false;
-input bool InpInvertDirection           = false;
+input bool InpInvertDirection           = true;
 input int InpAdxPeriod = 14;
 input int InpZscorePeriod = 20;
 input double InpZscoreThreshold = 1.5;
