@@ -155,7 +155,7 @@ public:
       double dayPnl = ClosedPnlToday("");
       double balance = AccountInfoDouble(ACCOUNT_BALANCE);
       double dayStartBalance = (balance - dayPnl);
-      if(dayStartBalance <= 0.0)
+      if(dayStartBalance <= DBL_EPSILON)
       {
          reason = "Invalid day-start balance for daily guard calculation";
          return false;

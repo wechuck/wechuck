@@ -53,28 +53,33 @@ public:
       int prevStart = structureLookback + 1;
       int prevEnd = structureLookback * 2;
 
-      if(prevEnd < ArraySize(rates))
+      if(prevEnd >= ArraySize(rates))
       {
-         double recentHigh = rates[recentStart].high;
-         double prevHigh = rates[prevStart].high;
-         double recentLow = rates[recentStart].low;
-         double prevLow = rates[prevStart].low;
-
-         for(int i = recentStart + 1; i <= recentEnd; i++)
-         {
-            if(rates[i].high > recentHigh) recentHigh = rates[i].high;
-            if(rates[i].low < recentLow) recentLow = rates[i].low;
-         }
-
-         for(int i = prevStart + 1; i <= prevEnd; i++)
-         {
-            if(rates[i].high > prevHigh) prevHigh = rates[i].high;
-            if(rates[i].low < prevLow) prevLow = rates[i].low;
-         }
-
-         outBias.structureBull = (recentHigh > prevHigh && recentLow > prevLow);
-         outBias.structureBear = (recentHigh < prevHigh && recentLow < prevLow);
+         IndicatorRelease(emaFast);
+         IndicatorRelease(emaSlow);
+         outBias.details = "Structure window out of bounds";
+         return false;
       }
+
+      double recentHigh = rates[recentStart].high;
+      double prevHigh = rates[prevStart].high;
+      double recentLow = rates[recentStart].low;
+      double prevLow = rates[prevStart].low;
+
+      for(int i = recentStart + 1; i <= recentEnd; i++)
+      {
+         if(rates[i].high > recentHigh) recentHigh = rates[i].high;
+         if(rates[i].low < recentLow) recentLow = rates[i].low;
+      }
+
+      for(int i = prevStart + 1; i <= prevEnd; i++)
+      {
+         if(rates[i].high > prevHigh) prevHigh = rates[i].high;
+         if(rates[i].low < prevLow) prevLow = rates[i].low;
+      }
+
+      outBias.structureBull = (recentHigh > prevHigh && recentLow > prevLow);
+      outBias.structureBear = (recentHigh < prevHigh && recentLow < prevLow);
 
       if(outBias.emaBull && outBias.structureBull)
          outBias.direction = DIR_BUY;
