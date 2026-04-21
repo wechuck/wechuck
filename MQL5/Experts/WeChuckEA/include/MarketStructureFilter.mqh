@@ -48,17 +48,29 @@ public:
          return false;
       }
 
-      int hRecent = iHighest(symbol, PERIOD_M15, MODE_HIGH, structureLookback, 2);
-      int hPrev = iHighest(symbol, PERIOD_M15, MODE_HIGH, structureLookback, structureLookback + 2);
-      int lRecent = iLowest(symbol, PERIOD_M15, MODE_LOW, structureLookback, 2);
-      int lPrev = iLowest(symbol, PERIOD_M15, MODE_LOW, structureLookback, structureLookback + 2);
+      int recentStart = 1;
+      int recentEnd = structureLookback;
+      int prevStart = structureLookback + 1;
+      int prevEnd = structureLookback * 2;
 
-      if(hRecent >= 0 && hPrev >= 0 && lRecent >= 0 && lPrev >= 0)
+      if(prevEnd < ArraySize(rates))
       {
-         double recentHigh = iHigh(symbol, PERIOD_M15, hRecent);
-         double prevHigh = iHigh(symbol, PERIOD_M15, hPrev);
-         double recentLow = iLow(symbol, PERIOD_M15, lRecent);
-         double prevLow = iLow(symbol, PERIOD_M15, lPrev);
+         double recentHigh = rates[recentStart].high;
+         double prevHigh = rates[prevStart].high;
+         double recentLow = rates[recentStart].low;
+         double prevLow = rates[prevStart].low;
+
+         for(int i = recentStart + 1; i <= recentEnd; i++)
+         {
+            if(rates[i].high > recentHigh) recentHigh = rates[i].high;
+            if(rates[i].low < recentLow) recentLow = rates[i].low;
+         }
+
+         for(int i = prevStart + 1; i <= prevEnd; i++)
+         {
+            if(rates[i].high > prevHigh) prevHigh = rates[i].high;
+            if(rates[i].low < prevLow) prevLow = rates[i].low;
+         }
 
          outBias.structureBull = (recentHigh > prevHigh && recentLow > prevLow);
          outBias.structureBear = (recentHigh < prevHigh && recentLow < prevLow);
