@@ -82,6 +82,9 @@ public:
                  const int    zoneWingBars,
                  const int    zoneMinTouches,
                  const double zoneTolerancePct,
+                 const bool   setupCEnabled,
+                 const bool   setupCRequireADX,
+                 const double setupCMinBoxSize,
                  EntryScoreBreakdown &outScore)
    {
       outScore.valid     = false;
@@ -114,6 +117,9 @@ public:
       p.stochOverbought      = stochOverbought;
       p.m5RangeLookback      = m5RangeLookback;
       p.boxTouchTolerancePct = boxTolerancePct;
+      p.setupCEnabled        = setupCEnabled;
+      p.setupCRequireADX     = setupCRequireADX;
+      p.setupCMinBoxSize     = setupCMinBoxSize;
 
       StrategySignal sig;
       if(!m_core.Evaluate(symbol, p, sig))
@@ -133,7 +139,7 @@ public:
          return true;
 
       // "No Zone, No Trade" – enforced for Setup A (Rubber Band) only.
-      // Setup B already qualifies itself by the 5M box-edge proximity check.
+      // Setup B and C already qualify via box-edge proximity check.
       if(sig.setupType == SETUP_RUBBER_BAND && requireZone)
       {
          RefreshZones(symbol, zoneLookback, zoneWingBars,

@@ -106,6 +106,14 @@ input int  InpMaxDeviationPoints = 10;
 input int  InpOrderRetries       = 3;
 input bool InpAutoAttachSignal   = true;  // Attach WeChuckSignal indicator to the visual chart on init
 
+input group "Setup C – HFT Range Scalp"
+input bool   InpEnableSetupC          = true;   // Master switch for Setup C
+input bool   InpSetupCRequireADX      = false;  // Require 5M ADX < threshold (off = Stoch alone gates entry)
+input double InpSetupCMinBoxSizePips  = 30.0;   // Minimum box size in pips – below this skip C (spread guard)
+input double InpSetupCSLBufferPips    = 1.5;    // SL buffer beyond box edge for Setup C
+input double InpSetupCMaxProfitDollar = 15.0;   // Close Setup C when floating profit reaches this dollar amount
+input double InpSetupCMaxSlippagePips = 2.0;    // Slippage protection: max pips price may have moved from box edge at fill
+
 //──────────────────────────────────────────────────────────────────────────────
 // Globals
 //──────────────────────────────────────────────────────────────────────────────
@@ -115,9 +123,10 @@ CEntryScoring          g_scoring;
 CRiskManager           g_risk;
 CExecutionManager      g_exec;
 
-datetime g_lastM1BarTime      = 0;
-datetime g_lastEntrySignalBar = 0;
-bool     g_orderInFlight      = false;
+datetime  g_lastM1BarTime      = 0;
+datetime  g_lastEntrySignalBar = 0;
+bool      g_orderInFlight      = false;
+SetupType g_openPositionSetup  = SETUP_NONE;  // tracks which setup opened the current position
 
 //──────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -135,6 +144,16 @@ bool IsAllowedSymbol(const string symbol)
 bool IsGold(const string symbol)
 {
    return (StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0);
+}
+
+// Returns the price distance of one pip for the given symbol.
+// Forex 5/3-digit: 1 pip = 10 points.  Everything else: 1 pip = 1 point.
+double OnePipPrice(const string symbol)
+{
+   int    digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   double point  = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   double mult   = (digits == 3 || digits == 5) ? 10.0 : 1.0;
+   return point * mult;
 }
 
 int ForexPipsToPoints(const string symbol, const double pips)
@@ -248,6 +267,22 @@ void ManageOpenPosition(const string symbol)
    int  dir     = (posType == POSITION_TYPE_BUY) ? STRAT_DIR_BUY : STRAT_DIR_SELL;
 
    datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+
+   // ── Setup C max-profit guard – close once floating P&L reaches the dollar cap ─
+   // Checked before the min-hold gate so the cap always fires regardless of hold time.
+   if(g_openPositionSetup == SETUP_HFT_RANGE_SCALP && InpEnableSetupC &&
+      InpSetupCMaxProfitDollar > 0.0)
+   {
+      double posProfit = PositionGetDouble(POSITION_PROFIT);
+      if(posProfit >= InpSetupCMaxProfitDollar)
+      {
+         g_logger.LogDecision(symbol, false,
+            StringFormat("Setup C max-profit $%.2f reached (profit=$%.2f) – closing",
+                         InpSetupCMaxProfitDollar, posProfit));
+         g_exec.CloseSymbolPosition(symbol, g_logger);
+         return;
+      }
+   }
 
    // Minimum hold time – suppress all soft exits until elapsed (broker SL always active)
    if(InpMinHoldSeconds > 0 && TimeCurrent() - openTime < (datetime)InpMinHoldSeconds)
@@ -369,6 +404,9 @@ void TryEntry(const string symbol)
    }
 
    // ── Strategy signal evaluation ────────────────────────────────────────────
+   // Pre-compute Setup C minimum box size in price units for StrategyCore
+   double setupCMinBoxSize = InpSetupCMinBoxSizePips * OnePipPrice(symbol);
+
    EntryScoreBreakdown score;
    if(!g_scoring.Evaluate(symbol,
                            InpAdxPeriod,
@@ -392,6 +430,9 @@ void TryEntry(const string symbol)
                            InpZoneWingBars,
                            InpZoneMinTouches,
                            InpZoneTolerancePct,
+                           InpEnableSetupC,
+                           InpSetupCRequireADX,
+                           setupCMinBoxSize,
                            score))
    {
       g_logger.LogDecision(symbol, false, "Signal evaluation failed");
@@ -403,7 +444,8 @@ void TryEntry(const string symbol)
                      score.details);
 
    g_logger.TrackContribution(score.setup == SETUP_RUBBER_BAND,
-                               score.setup == SETUP_RANGE_SCALP);
+                               score.setup == SETUP_RANGE_SCALP,
+                               score.setup == SETUP_HFT_RANGE_SCALP);
 
    if(!score.valid)
    {
@@ -439,10 +481,41 @@ void TryEntry(const string symbol)
    // ── Compute price levels ──────────────────────────────────────────────────
    MqlTick tick;
    if(!SymbolInfoTick(symbol, tick)) return;
-   double point  = SymbolInfoDouble(symbol, SYMBOL_POINT);
-   double price  = (score.direction == STRAT_DIR_BUY) ? tick.ask : tick.bid;
+   double point   = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   double pipSize = OnePipPrice(symbol);              // price distance of 1 pip
+   double price   = (score.direction == STRAT_DIR_BUY) ? tick.ask : tick.bid;
 
-   // Pip-sized buffer beyond the wick / box edge
+   // ── Slippage Protection: pre-entry box-edge distance check ───────────────
+   // For Setup B and C the entry is triggered by a box-wall touch.  If price
+   // spiked to the line and instantly rejected, by the time we reach this code
+   // the ask/bid may already have moved far from the edge – entering there
+   // gives a terrible fill relative to the intended structure level.
+   // We re-read the live price and refuse the order if it has drifted beyond
+   // InpSetupCMaxSlippagePips from the relevant box edge.
+   if(score.setup == SETUP_HFT_RANGE_SCALP || score.setup == SETUP_RANGE_SCALP)
+   {
+      if(score.boxHigh > 0.0 && score.boxLow > 0.0)
+      {
+         double slipLimit = InpSetupCMaxSlippagePips * pipSize;
+         bool   priceOk   = false;
+         if(score.direction == STRAT_DIR_BUY)
+            priceOk = (tick.ask <= score.boxLow + slipLimit);   // BUY near low
+         else
+            priceOk = (tick.bid >= score.boxHigh - slipLimit);  // SELL near high
+
+         if(!priceOk)
+         {
+            g_logger.LogDecision(symbol, false,
+               StringFormat("Slippage gate: price %.5f drifted >%.1f pips from box edge "
+                            "(boxLow=%.5f boxHigh=%.5f) – entry skipped",
+                            price, InpSetupCMaxSlippagePips,
+                            score.boxLow, score.boxHigh));
+            return;
+         }
+      }
+   }
+
+   // Pip-sized buffer beyond the wick / box edge (Setups A and B)
    int    slBufPoints = IsGold(symbol)
                         ? (int)(InpSlBufferPips * 10.0)
                         : ForexPipsToPoints(symbol, InpSlBufferPips);
@@ -472,6 +545,15 @@ void TryEntry(const string symbol)
            ? score.boxLow  - slBuf
            : score.boxHigh + slBuf;
    }
+   else if(score.setup == SETUP_HFT_RANGE_SCALP &&
+           score.boxHigh > 0.0 && score.boxLow > 0.0)
+   {
+      // Setup C – SL just outside box edge using the tighter Setup-C-specific buffer
+      double slCBuf = InpSetupCSLBufferPips * pipSize;
+      sl = (score.direction == STRAT_DIR_BUY)
+           ? score.boxLow  - slCBuf
+           : score.boxHigh + slCBuf;
+   }
    else
    {
       // Fallback – fixed pip distance
@@ -491,10 +573,10 @@ void TryEntry(const string symbol)
    if(slPoints < 1) slPoints = 1;
 
    // ── TP Placement ──────────────────────────────────────────────────────────
-   // Setup B: opposite box wall (natural range target).
+   // Setup B and C: opposite box wall (natural range target); trailing then extends it.
    // Setup A: hard TP at InpRRMax × SL distance; trailing activates at InpRRMin.
    double tp;
-   if(score.setup == SETUP_RANGE_SCALP &&
+   if((score.setup == SETUP_RANGE_SCALP || score.setup == SETUP_HFT_RANGE_SCALP) &&
       score.boxHigh > 0.0 && score.boxLow > 0.0)
    {
       tp = (score.direction == STRAT_DIR_BUY) ? score.boxHigh : score.boxLow;
@@ -514,15 +596,50 @@ void TryEntry(const string symbol)
                                 sl, tp, g_logger);
    g_orderInFlight = false;
 
+   // ── Post-fill slippage validation (Setup B and C) ─────────────────────────
+   // Even if the order was accepted by the broker, the actual fill price may
+   // have slipped past the box line.  In that case the trade is structurally
+   // invalid – we close it immediately before it can lose on a bad entry.
+   if(opened && (score.setup == SETUP_HFT_RANGE_SCALP || score.setup == SETUP_RANGE_SCALP))
+   {
+      if(score.boxHigh > 0.0 && score.boxLow > 0.0 && PositionSelect(symbol))
+      {
+         double fillPrice  = PositionGetDouble(POSITION_PRICE_OPEN);
+         double boxEdge    = (score.direction == STRAT_DIR_BUY) ? score.boxLow : score.boxHigh;
+         double slipLimit  = InpSetupCMaxSlippagePips * pipSize;
+         bool   fillOk;
+         // BUY filled from below: fill should not be far above boxLow
+         // SELL filled from above: fill should not be far below boxHigh
+         if(score.direction == STRAT_DIR_BUY)
+            fillOk = (fillPrice <= boxEdge + slipLimit);
+         else
+            fillOk = (fillPrice >= boxEdge - slipLimit);
+
+         if(!fillOk)
+         {
+            g_logger.LogDecision(symbol, false,
+               StringFormat("Post-fill slip: fill=%.5f edge=%.5f slip=%.1f pips > limit %.1f – closing bad fill",
+                            fillPrice, boxEdge,
+                            MathAbs(fillPrice - boxEdge) / pipSize,
+                            InpSetupCMaxSlippagePips));
+            g_exec.CloseSymbolPosition(symbol, g_logger);
+            opened = false;
+         }
+      }
+   }
+
    if(opened)
    {
+      g_openPositionSetup  = (SetupType)score.setup;
       g_lastEntrySignalBar = signalBar;
       g_risk.RegisterEntry(TimeCurrent());
+
+      string setupName = (score.setup == SETUP_RUBBER_BAND)    ? "RubberBand"
+                       : (score.setup == SETUP_RANGE_SCALP)    ? "RangeScalp"
+                                                                : "HFTRangeScalp";
       g_logger.LogDecision(symbol, true,
                            StringFormat("Entry executed | setup=%s dir=%d",
-                                        score.setup == SETUP_RUBBER_BAND
-                                           ? "RubberBand" : "RangeScalp",
-                                        score.direction));
+                                        setupName, score.direction));
    }
    else
    {
@@ -575,7 +692,11 @@ int OnInit()
       }
    }
 
-   g_logger.Log("EA initialized (v2.10 – Exhaustion & Range Scalp Strategy)");
+   g_logger.Log(StringFormat(
+      "EA initialized (v2.20) | SetupC=%s requireADX=%s minBox=%.1fpips slipGate=%.1fpips maxProfit=$%.2f",
+      InpEnableSetupC ? "ON" : "OFF",
+      InpSetupCRequireADX ? "YES" : "NO",
+      InpSetupCMinBoxSizePips, InpSetupCMaxSlippagePips, InpSetupCMaxProfitDollar));
    return INIT_SUCCEEDED;
 }
 
@@ -587,6 +708,10 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    if(!IsAllowedSymbol(_Symbol)) return;
+
+   // Reset setup tracker when no position is open so the next entry starts clean
+   if(!PositionExistsForSymbol(_Symbol))
+      g_openPositionSetup = SETUP_NONE;
 
    ManageOpenPosition(_Symbol);
 
