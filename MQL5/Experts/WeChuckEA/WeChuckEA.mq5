@@ -180,7 +180,8 @@ input bool   InpSetupCRequireADX      = false;  // Require 5M ADX < threshold (o
 input double InpSetupCMinBoxSizePips  = 30.0;   // Minimum box size in pips – below this skip C (spread guard)
 input double InpSetupCSLBufferPips    = 1.5;    // SL buffer beyond box edge for Setup C
 input double InpSetupCMaxProfitDollar = 15.0;   // Close Setup C when floating profit reaches this dollar amount
-input double InpSetupCMaxSlippagePips = 2.0;    // Slippage protection: max pips price may have moved from box edge at fill
+input double InpSetupCMaxSlippagePips     = 2.0;   // Slippage protection: max pips from box edge at fill (Forex)
+input double InpSetupCMaxSlippagePipsGold = 50.0;  // Slippage protection: max pips from box edge at fill (Gold/XAUUSD)
 
 //──────────────────────────────────────────────────────────────────────────────
 // Globals
@@ -561,13 +562,15 @@ void TryEntry(const string symbol)
    // the ask/bid may already have moved far from the edge – entering there
    // gives a terrible fill relative to the intended structure level.
    // We re-read the live price and refuse the order if it has drifted beyond
-   // InpSetupCMaxSlippagePips from the relevant box edge.
+   // InpSetupCMaxSlippagePips (forex) / InpSetupCMaxSlippagePipsGold (gold)
+   // from the relevant box edge.
    if(score.setup == SETUP_HFT_RANGE_SCALP || score.setup == SETUP_RANGE_SCALP)
    {
       if(score.boxHigh > 0.0 && score.boxLow > 0.0)
       {
-         double slipLimit = InpSetupCMaxSlippagePips * pipSize;
-         bool   priceOk   = false;
+         double maxSlipPips = IsGold(symbol) ? InpSetupCMaxSlippagePipsGold : InpSetupCMaxSlippagePips;
+         double slipLimit   = maxSlipPips * pipSize;
+         bool   priceOk     = false;
          if(score.direction == STRAT_DIR_BUY)
             priceOk = (tick.ask <= score.boxLow + slipLimit);   // BUY near low
          else
@@ -578,7 +581,7 @@ void TryEntry(const string symbol)
             g_logger.LogDecision(symbol, false,
                StringFormat("Slippage gate: price %.5f drifted >%.1f pips from box edge "
                             "(boxLow=%.5f boxHigh=%.5f) – entry skipped",
-                            price, InpSetupCMaxSlippagePips,
+                            price, maxSlipPips,
                             score.boxLow, score.boxHigh));
             return;
          }
@@ -674,9 +677,10 @@ void TryEntry(const string symbol)
    {
       if(score.boxHigh > 0.0 && score.boxLow > 0.0 && PositionSelect(symbol))
       {
-         double fillPrice  = PositionGetDouble(POSITION_PRICE_OPEN);
-         double boxEdge    = (score.direction == STRAT_DIR_BUY) ? score.boxLow : score.boxHigh;
-         double slipLimit  = InpSetupCMaxSlippagePips * pipSize;
+         double fillPrice   = PositionGetDouble(POSITION_PRICE_OPEN);
+         double boxEdge     = (score.direction == STRAT_DIR_BUY) ? score.boxLow : score.boxHigh;
+         double maxSlipPips = IsGold(symbol) ? InpSetupCMaxSlippagePipsGold : InpSetupCMaxSlippagePips;
+         double slipLimit   = maxSlipPips * pipSize;
          bool   fillOk;
          // BUY filled from below: fill should not be far above boxLow
          // SELL filled from above: fill should not be far below boxHigh
@@ -691,7 +695,7 @@ void TryEntry(const string symbol)
                StringFormat("Post-fill slip: fill=%.5f edge=%.5f slip=%.1f pips > limit %.1f – closing bad fill",
                             fillPrice, boxEdge,
                             MathAbs(fillPrice - boxEdge) / pipSize,
-                            InpSetupCMaxSlippagePips));
+                            maxSlipPips));
             g_exec.CloseSymbolPosition(symbol, g_logger);
             opened = false;
          }
@@ -763,12 +767,12 @@ int OnInit()
    }
 
    g_logger.Log(StringFormat(
-      "EA initialized (v2.30) | A=%s B=%s C=%s(adx=%s minBox=%.0fpips slip=%.1fpips maxP=$%.0f)",
+      "EA initialized (v2.30) | A=%s B=%s C=%s(adx=%s minBox=%.0fpips slipForex=%.1fpips slipGold=%.1fpips maxP=$%.0f)",
       InpEnableSetupA ? "ON" : "OFF",
       InpEnableSetupB ? "ON" : "OFF",
       InpEnableSetupC ? "ON" : "OFF",
       InpSetupCRequireADX ? "ON" : "OFF",
-      InpSetupCMinBoxSizePips, InpSetupCMaxSlippagePips, InpSetupCMaxProfitDollar));
+      InpSetupCMinBoxSizePips, InpSetupCMaxSlippagePips, InpSetupCMaxSlippagePipsGold, InpSetupCMaxProfitDollar));
    return INIT_SUCCEEDED;
 }
 
