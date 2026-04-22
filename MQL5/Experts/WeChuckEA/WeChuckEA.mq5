@@ -441,39 +441,9 @@ void TryEntry(const string symbol)
       return;
    }
 
-   // ── Pre-conditions ────────────────────────────────────────────────────────
-   int spreadPts = 0;
-   if(!CheckSpreadOk(symbol, spreadPts))
-   {
-      g_logger.LogDecision(symbol, false, "Spread too high");
-      return;
-   }
-
-   if(InLowLiquidityWindow(TimeCurrent()))
-   {
-      g_logger.LogDecision(symbol, false, "Low-liquidity session block");
-      return;
-   }
-
-   if(!CandleBodyIsHealthy(symbol))
-   {
-      g_logger.LogDecision(symbol, false, "Body/range ratio too small");
-      return;
-   }
-
-   // ── Optional M15 bias alignment ──────────────────────────────────────────
-   BiasResult bias;
-   if(InpRequireM15Alignment)
-   {
-      if(!g_bias.Evaluate(symbol, InpEmaFast, InpEmaSlow, InpStructureLookback, bias))
-      {
-         g_logger.LogDecision(symbol, false, "M15 bias evaluation failed");
-         return;
-      }
-   }
-
    // ── Strategy signal evaluation ────────────────────────────────────────────
-   // Pre-compute Setup C minimum box size in price units for StrategyCore
+   // Evaluated first so Setup C (Stoch-only, unrestricted) can bypass the
+   // pre-conditions below that apply only to Setups A and B.
    double setupCMinBoxSize = InpSetupCMinBoxSizePips * OnePipPrice(symbol);
 
    EntryScoreBreakdown score;
@@ -524,14 +494,49 @@ void TryEntry(const string symbol)
       return;
    }
 
-   // ── Optional M15 direction alignment check ────────────────────────────────
-   if(InpRequireM15Alignment && bias.direction != DIR_NONE)
+   // ── Pre-conditions (skipped entirely for Setup C – Stoch-only mode) ───────
+   // Setup C bypasses spread, low-liquidity, and candle-body filters so that
+   // pure Stochastic extreme entries are never blocked by market-structure gates.
+   if(score.setup != SETUP_HFT_RANGE_SCALP)
    {
-      int biasDir = (bias.direction == DIR_BUY) ? STRAT_DIR_BUY : STRAT_DIR_SELL;
-      if(biasDir != score.direction)
+      int spreadPts = 0;
+      if(!CheckSpreadOk(symbol, spreadPts))
       {
-         g_logger.LogDecision(symbol, false, "Signal direction conflicts with M15 bias");
+         g_logger.LogDecision(symbol, false, "Spread too high");
          return;
+      }
+
+      if(InLowLiquidityWindow(TimeCurrent()))
+      {
+         g_logger.LogDecision(symbol, false, "Low-liquidity session block");
+         return;
+      }
+
+      if(!CandleBodyIsHealthy(symbol))
+      {
+         g_logger.LogDecision(symbol, false, "Body/range ratio too small");
+         return;
+      }
+   }
+
+   // ── Optional M15 bias alignment (skipped for Setup C) ────────────────────
+   BiasResult bias;
+   if(InpRequireM15Alignment && score.setup != SETUP_HFT_RANGE_SCALP)
+   {
+      if(!g_bias.Evaluate(symbol, InpEmaFast, InpEmaSlow, InpStructureLookback, bias))
+      {
+         g_logger.LogDecision(symbol, false, "M15 bias evaluation failed");
+         return;
+      }
+
+      if(bias.direction != DIR_NONE)
+      {
+         int biasDir = (bias.direction == DIR_BUY) ? STRAT_DIR_BUY : STRAT_DIR_SELL;
+         if(biasDir != score.direction)
+         {
+            g_logger.LogDecision(symbol, false, "Signal direction conflicts with M15 bias");
+            return;
+         }
       }
    }
 
@@ -557,14 +562,9 @@ void TryEntry(const string symbol)
    double price   = (score.direction == STRAT_DIR_BUY) ? tick.ask : tick.bid;
 
    // ── Slippage Protection: pre-entry box-edge distance check ───────────────
-   // For Setup B and C the entry is triggered by a box-wall touch.  If price
-   // spiked to the line and instantly rejected, by the time we reach this code
-   // the ask/bid may already have moved far from the edge – entering there
-   // gives a terrible fill relative to the intended structure level.
-   // We re-read the live price and refuse the order if it has drifted beyond
-   // InpSetupCMaxSlippagePips (forex) / InpSetupCMaxSlippagePipsGold (gold)
-   // from the relevant box edge.
-   if(score.setup == SETUP_HFT_RANGE_SCALP || score.setup == SETUP_RANGE_SCALP)
+   // Applies to Setup B only.  Setup C is unrestricted (Stoch-only mode) so
+   // the slippage gate is intentionally bypassed – price can be anywhere.
+   if(score.setup == SETUP_RANGE_SCALP)
    {
       if(score.boxHigh > 0.0 && score.boxLow > 0.0)
       {
@@ -646,11 +646,20 @@ void TryEntry(const string symbol)
    if(slPoints < 1) slPoints = 1;
 
    // ── TP Placement ──────────────────────────────────────────────────────────
-   // Setup B and C: opposite box wall (natural range target); trailing then extends it.
+   // Setup C (Stoch-only / unrestricted): large TP = InpRRMax × SL distance.
+   //   The box opposite wall is available but we use the full RRMax distance so
+   //   the trade rides the move as far as possible ("large TP" mode).
+   // Setup B: opposite box wall (natural range target); trailing then extends it.
    // Setup A: hard TP at InpRRMax × SL distance; trailing activates at InpRRMin.
    double tp;
-   if((score.setup == SETUP_RANGE_SCALP || score.setup == SETUP_HFT_RANGE_SCALP) &&
-      score.boxHigh > 0.0 && score.boxLow > 0.0)
+   if(score.setup == SETUP_HFT_RANGE_SCALP)
+   {
+      tp = (score.direction == STRAT_DIR_BUY)
+           ? price + slDist * InpRRMax
+           : price - slDist * InpRRMax;
+   }
+   else if(score.setup == SETUP_RANGE_SCALP &&
+           score.boxHigh > 0.0 && score.boxLow > 0.0)
    {
       tp = (score.direction == STRAT_DIR_BUY) ? score.boxHigh : score.boxLow;
    }
@@ -669,11 +678,9 @@ void TryEntry(const string symbol)
                                 sl, tp, g_logger);
    g_orderInFlight = false;
 
-   // ── Post-fill slippage validation (Setup B and C) ─────────────────────────
-   // Even if the order was accepted by the broker, the actual fill price may
-   // have slipped past the box line.  In that case the trade is structurally
-   // invalid – we close it immediately before it can lose on a bad entry.
-   if(opened && (score.setup == SETUP_HFT_RANGE_SCALP || score.setup == SETUP_RANGE_SCALP))
+   // ── Post-fill slippage validation (Setup B only) ─────────────────────────
+   // Setup C is unrestricted (Stoch-only mode) – post-fill check skipped.
+   if(opened && score.setup == SETUP_RANGE_SCALP)
    {
       if(score.boxHigh > 0.0 && score.boxLow > 0.0 && PositionSelect(symbol))
       {
