@@ -3,21 +3,137 @@
 
 #define LOSS_STREAK_LOOKBACK_DAYS 5
 #define MIN_DAY_START_BALANCE 0.01
+#define ROLLING_WIN_BUFFER_MAX 50
 
 class CRiskManager
 {
 private:
    datetime m_lastEntryTime;
 
+   // ── Rolling win rate (circular buffer) ─────────────────────────────────
+   int  m_winBuffer[ROLLING_WIN_BUFFER_MAX];  // 1 = win, 0 = loss
+   int  m_winBufHead;
+   int  m_winBufCount;
+   int  m_rollingWindowSize;
+
+   // ── Drawdown-adaptive lot scaling ───────────────────────────────────────
+   double m_sessionPeakEquity;     // Highest equity since last daily reset
+   bool   m_ddScaleActive;         // True when lot scaling is currently halved
+
+   // ── Daily reset tracking ─────────────────────────────────────────────────
+   datetime m_lastDailyReset;
+
 public:
    void Init()
    {
-      m_lastEntryTime = 0;
+      m_lastEntryTime      = 0;
+      m_winBufHead         = 0;
+      m_winBufCount        = 0;
+      m_rollingWindowSize  = 20;
+      m_sessionPeakEquity  = 0.0;
+      m_ddScaleActive      = false;
+      m_lastDailyReset     = 0;
+      for(int i = 0; i < ROLLING_WIN_BUFFER_MAX; i++) m_winBuffer[i] = 0;
    }
 
    void RegisterEntry(const datetime nowTime)
    {
       m_lastEntryTime = nowTime;
+   }
+
+   //──────────────────────────────────────────────────────────────────────────
+   // SetRollingWindowSize – configures how many recent trades to track (max 50).
+   //──────────────────────────────────────────────────────────────────────────
+   void SetRollingWindowSize(const int n)
+   {
+      m_rollingWindowSize = MathMax(1, MathMin(n, ROLLING_WIN_BUFFER_MAX));
+   }
+
+   //──────────────────────────────────────────────────────────────────────────
+   // RecordTradeOutcome – push a win (true) or loss (false) into the circular buffer.
+   // Call this when a position closes.
+   //──────────────────────────────────────────────────────────────────────────
+   void RecordTradeOutcome(const bool win)
+   {
+      m_winBuffer[m_winBufHead] = win ? 1 : 0;
+      m_winBufHead = (m_winBufHead + 1) % m_rollingWindowSize;
+      if(m_winBufCount < m_rollingWindowSize) m_winBufCount++;
+   }
+
+   //──────────────────────────────────────────────────────────────────────────
+   // RollingWinRatePct – returns win rate over the last N recorded trades (0–100).
+   // Returns 100.0 when no trades have been recorded yet (no restriction).
+   //──────────────────────────────────────────────────────────────────────────
+   double RollingWinRatePct() const
+   {
+      if(m_winBufCount == 0) return 100.0;
+      int wins = 0;
+      for(int i = 0; i < m_winBufCount; i++) wins += m_winBuffer[i];
+      return (wins * 100.0) / m_winBufCount;
+   }
+
+   //──────────────────────────────────────────────────────────────────────────
+   // UpdateSessionPeak – call each tick to keep peak equity current.
+   //──────────────────────────────────────────────────────────────────────────
+   void UpdateSessionPeak(const double equity)
+   {
+      if(equity > m_sessionPeakEquity)
+         m_sessionPeakEquity = equity;
+   }
+
+   //──────────────────────────────────────────────────────────────────────────
+   // GetLotFactor – returns the drawdown-adaptive lot multiplier.
+   // ddScalePct    : drawdown % from session peak that triggers halving (e.g. 5.0)
+   // ddLotFactor   : lot multiplier when scaling is active (e.g. 0.5)
+   // Once activated the factor stays halved until a winning trade is recorded,
+   // which resets m_ddScaleActive to false.
+   //──────────────────────────────────────────────────────────────────────────
+   double GetLotFactor(const double equity,
+                       const double ddScalePct,
+                       const double ddLotFactor)
+   {
+      if(ddScalePct <= 0.0 || m_sessionPeakEquity <= 0.0) return 1.0;
+
+      double drawdownPct = (m_sessionPeakEquity - equity) / m_sessionPeakEquity * 100.0;
+
+      if(drawdownPct >= ddScalePct)
+         m_ddScaleActive = true;
+
+      // Re-enable full lots only after the last recorded trade was a win
+      if(m_ddScaleActive && m_winBufCount > 0 &&
+         m_winBuffer[(m_winBufHead - 1 + m_rollingWindowSize) % m_rollingWindowSize] == 1)
+         m_ddScaleActive = false;
+
+      return m_ddScaleActive ? ddLotFactor : 1.0;
+   }
+
+   //──────────────────────────────────────────────────────────────────────────
+   // CheckDailyReset – call once per new M1 bar.
+   // Resets session peak and rolling buffer at 00:00 UTC each day.
+   //──────────────────────────────────────────────────────────────────────────
+   void CheckDailyReset(const datetime now)
+   {
+      MqlDateTime dt;
+      TimeToStruct(now, dt);
+
+      MqlDateTime resetDT;
+      resetDT.year  = dt.year;
+      resetDT.mon   = dt.mon;
+      resetDT.day   = dt.day;
+      resetDT.hour  = 0;
+      resetDT.min   = 0;
+      resetDT.sec   = 0;
+      datetime todayStart = StructToTime(resetDT);
+
+      if(todayStart > m_lastDailyReset)
+      {
+         m_lastDailyReset    = todayStart;
+         m_sessionPeakEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+         m_winBufHead        = 0;
+         m_winBufCount       = 0;
+         m_ddScaleActive     = false;
+         Print("[RiskManager] Daily reset at ", TimeToString(todayStart, TIME_DATE | TIME_MINUTES));
+      }
    }
 
    int CountOpenPositionsAll()

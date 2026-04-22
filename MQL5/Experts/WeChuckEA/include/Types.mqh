@@ -27,9 +27,17 @@ struct EntryScoreBreakdown
    double    rsiCur;
    double    boxHigh;
    double    boxLow;
-   double    signalBarHigh;   // 1M bar[1] high – for wick-based SL placement
-   double    signalBarLow;    // 1M bar[1] low  – for wick-based SL placement
+   double    signalBarHigh;        // 1M bar[1] high – for wick-based SL placement
+   double    signalBarLow;         // 1M bar[1] low  – for wick-based SL placement
    string    details;
+   // New fields from post-signal filter gates
+   bool      wickSweepConfirmed;   // Wick sweep was confirmed (SL anchor below sweep wick)
+   double    sweepWickLow;         // BUY wick-sweep bar[1].low  – use as SL anchor
+   double    sweepWickHigh;        // SELL wick-sweep bar[1].high – use as SL anchor
+   int       boxAgeMinutes;        // Age of the box in minutes
+   int       boxWallTouches;       // Touch count on the relevant wall
+   double    m5StochK;             // M5 Stochastic K value (for logging)
+   int       h4Bias;               // H4 EMA bias: 1=bull, -1=bear, 0=neutral
 };
 
 struct BiasResult

@@ -3,8 +3,8 @@
 
 //──────────────────────────────────────────────────────────────────────────────
 // EntryScoring.mqh
-// Thin adapter layer: translates EA input parameters into a StrategyParams
-// struct and delegates all signal logic to CStrategyCore (StrategyCore.mqh).
+// Thin adapter layer: accepts a pre-built StrategyParams struct and delegates
+// all signal logic to CStrategyCore (StrategyCore.mqh).
 // Handles the "No Zone, No Trade" guard using ZoneDetector.mqh.
 //──────────────────────────────────────────────────────────────────────────────
 
@@ -57,87 +57,59 @@ public:
 
    //──────────────────────────────────────────────────────────────────────────
    // Evaluate
+   // Accepts a fully-populated StrategyParams struct (all filter fields included).
    // Returns false only on a hard data error.
    // outScore.valid distinguishes "no signal" from "signal confirmed".
    //──────────────────────────────────────────────────────────────────────────
    bool Evaluate(const string symbol,
-                 const int    adxPeriod,
-                 const double adxExhaustionLevel,
-                 const double adxExpandingMin,
-                 const double adxExpandingMax,
-                 const double adxRangingThreshold,
-                 const double adxExitWeakThreshold,
-                 const int    rsiPeriod,
-                 const double rsiOversold,
-                 const double rsiOverbought,
-                 const int    stochK,
-                 const int    stochD,
-                 const int    stochSlowing,
-                 const double stochOversold,
-                 const double stochOverbought,
-                 const int    m5RangeLookback,
-                 const double boxTolerancePct,
+                 const StrategyParams &p,
                  const bool   requireZone,
                  const int    zoneLookback,
                  const int    zoneWingBars,
                  const int    zoneMinTouches,
                  const double zoneTolerancePct,
-                 const bool   setupAEnabled,
-                 const bool   setupBEnabled,
-                 const bool   setupCEnabled,
-                 const bool   setupCRequireADX,
-                 const double setupCMinBoxSize,
                  EntryScoreBreakdown &outScore)
    {
-      outScore.valid     = false;
-      outScore.setup     = SETUP_NONE;
-      outScore.direction = STRAT_DIR_NONE;
-      outScore.adx1M     = 0.0;
-      outScore.adx5M     = 0.0;
-      outScore.stochK    = 0.0;
-      outScore.rsiCur    = 0.0;
-      outScore.boxHigh   = 0.0;
-      outScore.boxLow    = 0.0;
-      outScore.signalBarHigh = 0.0;
-      outScore.signalBarLow  = 0.0;
-      outScore.details   = "";
-
-      StrategyParams p;
-      p.adxPeriod            = adxPeriod;
-      p.adxExhaustionLevel   = adxExhaustionLevel;
-      p.adxExpandingMin      = adxExpandingMin;
-      p.adxExpandingMax      = adxExpandingMax;
-      p.adxRangingThreshold  = adxRangingThreshold;
-      p.adxExitWeakThreshold = adxExitWeakThreshold;
-      p.rsiPeriod            = rsiPeriod;
-      p.rsiOversold          = rsiOversold;
-      p.rsiOverbought        = rsiOverbought;
-      p.stochKPeriod         = stochK;
-      p.stochDPeriod         = stochD;
-      p.stochSlowing         = stochSlowing;
-      p.stochOversold        = stochOversold;
-      p.stochOverbought      = stochOverbought;
-      p.m5RangeLookback      = m5RangeLookback;
-      p.boxTouchTolerancePct = boxTolerancePct;
-      p.setupAEnabled        = setupAEnabled;
-      p.setupBEnabled        = setupBEnabled;
-      p.setupCEnabled        = setupCEnabled;
-      p.setupCRequireADX     = setupCRequireADX;
-      p.setupCMinBoxSize     = setupCMinBoxSize;
+      outScore.valid              = false;
+      outScore.setup              = SETUP_NONE;
+      outScore.direction          = STRAT_DIR_NONE;
+      outScore.adx1M              = 0.0;
+      outScore.adx5M              = 0.0;
+      outScore.stochK             = 0.0;
+      outScore.rsiCur             = 0.0;
+      outScore.boxHigh            = 0.0;
+      outScore.boxLow             = 0.0;
+      outScore.signalBarHigh      = 0.0;
+      outScore.signalBarLow       = 0.0;
+      outScore.details            = "";
+      outScore.wickSweepConfirmed = false;
+      outScore.sweepWickLow       = 0.0;
+      outScore.sweepWickHigh      = 0.0;
+      outScore.boxAgeMinutes      = 0;
+      outScore.boxWallTouches     = 0;
+      outScore.m5StochK           = 0.0;
+      outScore.h4Bias             = 0;
 
       StrategySignal sig;
       if(!m_core.Evaluate(symbol, p, sig))
          return false;
 
-      outScore.adx1M   = sig.adx1M;
-      outScore.adx5M   = sig.adx5M;
-      outScore.stochK  = sig.stochK;
-      outScore.rsiCur  = sig.rsiCur;
-      outScore.boxHigh = sig.boxHigh;
-      outScore.boxLow  = sig.boxLow;
-      outScore.signalBarHigh = sig.signalBarHigh;
-      outScore.signalBarLow  = sig.signalBarLow;
-      outScore.details = sig.details;
+      outScore.adx1M              = sig.adx1M;
+      outScore.adx5M              = sig.adx5M;
+      outScore.stochK             = sig.stochK;
+      outScore.rsiCur             = sig.rsiCur;
+      outScore.boxHigh            = sig.boxHigh;
+      outScore.boxLow             = sig.boxLow;
+      outScore.signalBarHigh      = sig.signalBarHigh;
+      outScore.signalBarLow       = sig.signalBarLow;
+      outScore.details            = sig.details;
+      outScore.wickSweepConfirmed = sig.wickSweepConfirmed;
+      outScore.sweepWickLow       = sig.sweepWickLow;
+      outScore.sweepWickHigh      = sig.sweepWickHigh;
+      outScore.boxAgeMinutes      = sig.boxAgeMinutes;
+      outScore.boxWallTouches     = sig.boxWallTouches;
+      outScore.m5StochK           = sig.m5StochK;
+      outScore.h4Bias             = sig.h4Bias;
 
       if(sig.setupType == SETUP_NONE)
          return true;
@@ -171,32 +143,8 @@ public:
    //──────────────────────────────────────────────────────────────────────────
    bool ShouldExitByDynamics(const string symbol,
                               const int    positionDirection,
-                              const int    adxPeriod,
-                              const double adxExitWeakThreshold,
-                              const int    stochK,
-                              const int    stochD,
-                              const int    stochSlowing,
-                              const double stochOversold,
-                              const double stochOverbought)
+                              const StrategyParams &p)
    {
-      StrategyParams p;
-      p.adxPeriod            = adxPeriod;
-      p.adxExhaustionLevel   = 40.0;
-      p.adxExpandingMin      = 25.0;
-      p.adxExpandingMax      = 35.0;
-      p.adxRangingThreshold  = 20.0;
-      p.adxExitWeakThreshold = adxExitWeakThreshold;
-      p.rsiPeriod            = 14;
-      p.rsiOversold          = 30.0;
-      p.rsiOverbought        = 70.0;
-      p.stochKPeriod         = stochK;
-      p.stochDPeriod         = stochD;
-      p.stochSlowing         = stochSlowing;
-      p.stochOversold        = stochOversold;
-      p.stochOverbought      = stochOverbought;
-      p.m5RangeLookback      = 50;
-      p.boxTouchTolerancePct = 0.15;
-
       return m_core.ShouldExit(symbol, positionDirection, p);
    }
 };
