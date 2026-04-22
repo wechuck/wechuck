@@ -380,29 +380,34 @@ public:
          }
       }
 
-      // ── SETUP C: "HFT Range Scalp" – Stochastic-Only, Unrestricted ──────
-      // When InpEnableSetupC is true the EA enters on Stochastic K extreme
-      // alone – no ADX filter, no box proximity, no candle-body gate.
-      // Direction: K ≤ oversold → BUY; K ≥ overbought → SELL.
+      // ── SETUP C: "HFT Range Scalp" – Stochastic + RSI Filtered ─────────
+      // Entry requires Stochastic K at an extreme AND RSI confirmation that
+      // momentum is reversing (was oversold/overbought and is now curling back).
+      //   BUY : K ≤ oversold  AND rsiPrev < rsiOversold  AND rsiCur > rsiPrev
+      //   SELL: K ≥ overbought AND rsiPrev > rsiOverbought AND rsiCur < rsiPrev
       if(p.setupCEnabled)
       {
-         if(stochK <= p.stochOversold)
+         if(stochK <= p.stochOversold &&
+            rsiPrev < p.rsiOversold   &&
+            rsiCur  > rsiPrev)
          {
             outSig.setupType = SETUP_HFT_RANGE_SCALP;
             outSig.direction = STRAT_DIR_BUY;
             outSig.details   = StringFormat(
-               "SETUP C BUY | stochK=%.1f(oversold<=%.0f) adx1M=%.1f adx5M=%.1f boxLow=%.5f boxHigh=%.5f",
-               stochK, p.stochOversold, adx1M, adx5M, boxLow, boxHigh);
+               "SETUP C BUY | stochK=%.1f(oversold<=%.0f) rsiPrev=%.1f rsiCur=%.1f adx1M=%.1f adx5M=%.1f boxLow=%.5f boxHigh=%.5f",
+               stochK, p.stochOversold, rsiPrev, rsiCur, adx1M, adx5M, boxLow, boxHigh);
             return true;
          }
 
-         if(stochK >= p.stochOverbought)
+         if(stochK >= p.stochOverbought &&
+            rsiPrev > p.rsiOverbought   &&
+            rsiCur  < rsiPrev)
          {
             outSig.setupType = SETUP_HFT_RANGE_SCALP;
             outSig.direction = STRAT_DIR_SELL;
             outSig.details   = StringFormat(
-               "SETUP C SELL | stochK=%.1f(overbought>=%.0f) adx1M=%.1f adx5M=%.1f boxLow=%.5f boxHigh=%.5f",
-               stochK, p.stochOverbought, adx1M, adx5M, boxLow, boxHigh);
+               "SETUP C SELL | stochK=%.1f(overbought>=%.0f) rsiPrev=%.1f rsiCur=%.1f adx1M=%.1f adx5M=%.1f boxLow=%.5f boxHigh=%.5f",
+               stochK, p.stochOverbought, rsiPrev, rsiCur, adx1M, adx5M, boxLow, boxHigh);
             return true;
          }
       }

@@ -1,7 +1,12 @@
 #property strict
-#property version   "2.30"
+#property version   "2.31"
 #property description "WeChuck EA – Multi-Timeframe Exhaustion & Range Scalp Strategy"
 // Changelog:
+//   v2.31 – Setup C entry now requires RSI confirmation in addition to Stochastic K
+//           extreme: BUY needs rsiPrev < rsiOversold AND rsiCur > rsiPrev; SELL needs
+//           rsiPrev > rsiOverbought AND rsiCur < rsiPrev.  Stochastic/ADX-based dynamic
+//           exit is disabled for Setup C trades – they only close by TP, SL, time exit,
+//           or max-profit cap.  Trailing SL (RRMin trigger) already applied to all setups.
 //   v2.30 – Per-setup enable/disable switches (InpEnableSetupA/B/C) for isolated
 //           backtesting. Improvement recommendations block added below.
 //   v2.20 – Setup C "HFT Range Scalp" added. Two-layer slippage protection (pre-entry
@@ -115,8 +120,8 @@ input double InpAdxExitWeakThreshold = 18.0;   // Close trade when 1M ADX drops 
 
 input group "RSI – Pressure Gauge (14-period)"
 input int    InpRsiPeriod            = 14;
-input double InpRsiOversold          = 30.0;   // Setup A BUY: RSI must be below this
-input double InpRsiOverbought        = 70.0;   // Setup A SELL: RSI must be above this
+input double InpRsiOversold          = 30.0;   // Setup A/C BUY: RSI must be below this
+input double InpRsiOverbought        = 70.0;   // Setup A/C SELL: RSI must be above this
 
 input group "Stochastic (14,1,3) – The Trigger"
 input int    InpStochK               = 14;
@@ -367,8 +372,11 @@ void ManageOpenPosition(const string symbol)
    }
 
    // Dynamic exit (only when in profit – protect winners)
+   // Skipped for Setup C – those trades close only by TP, SL, time exit,
+   // or max-profit cap; the Stochastic/ADX-based exit is intentionally disabled.
    double posProfit = PositionGetDouble(POSITION_PROFIT);
-   if(posProfit > 0.0 &&
+   if(g_openPositionSetup != SETUP_HFT_RANGE_SCALP &&
+      posProfit > 0.0 &&
       g_scoring.ShouldExitByDynamics(symbol, dir,
                                      InpAdxPeriod, InpAdxExitWeakThreshold,
                                      InpStochK, InpStochD, InpStochSlowing,
@@ -442,7 +450,7 @@ void TryEntry(const string symbol)
    }
 
    // ── Strategy signal evaluation ────────────────────────────────────────────
-   // Evaluated first so Setup C (Stoch-only, unrestricted) can bypass the
+   // Evaluated first so Setup C (Stoch+RSI filtered, box-unrestricted) can bypass the
    // pre-conditions below that apply only to Setups A and B.
    double setupCMinBoxSize = InpSetupCMinBoxSizePips * OnePipPrice(symbol);
 
@@ -494,7 +502,7 @@ void TryEntry(const string symbol)
       return;
    }
 
-   // ── Pre-conditions (skipped entirely for Setup C – Stoch-only mode) ───────
+   // ── Pre-conditions (skipped entirely for Setup C – box-unrestricted mode) ──
    // Setup C bypasses spread, low-liquidity, and candle-body filters so that
    // pure Stochastic extreme entries are never blocked by market-structure gates.
    if(score.setup != SETUP_HFT_RANGE_SCALP)
@@ -562,7 +570,7 @@ void TryEntry(const string symbol)
    double price   = (score.direction == STRAT_DIR_BUY) ? tick.ask : tick.bid;
 
    // ── Slippage Protection: pre-entry box-edge distance check ───────────────
-   // Applies to Setup B only.  Setup C is unrestricted (Stoch-only mode) so
+   // Applies to Setup B only.  Setup C is box-unrestricted so
    // the slippage gate is intentionally bypassed – price can be anywhere.
    if(score.setup == SETUP_RANGE_SCALP)
    {
@@ -646,7 +654,7 @@ void TryEntry(const string symbol)
    if(slPoints < 1) slPoints = 1;
 
    // ── TP Placement ──────────────────────────────────────────────────────────
-   // Setup C (Stoch-only / unrestricted): large TP = InpRRMax × SL distance.
+   // Setup C (Stoch+RSI filtered, box-unrestricted): large TP = InpRRMax × SL distance.
    //   The box opposite wall is available but we use the full RRMax distance so
    //   the trade rides the move as far as possible ("large TP" mode).
    // Setup B: opposite box wall (natural range target); trailing then extends it.
@@ -679,7 +687,7 @@ void TryEntry(const string symbol)
    g_orderInFlight = false;
 
    // ── Post-fill slippage validation (Setup B only) ─────────────────────────
-   // Setup C is unrestricted (Stoch-only mode) – post-fill check skipped.
+   // Setup C is box-unrestricted – post-fill check skipped.
    if(opened && score.setup == SETUP_RANGE_SCALP)
    {
       if(score.boxHigh > 0.0 && score.boxLow > 0.0 && PositionSelect(symbol))
