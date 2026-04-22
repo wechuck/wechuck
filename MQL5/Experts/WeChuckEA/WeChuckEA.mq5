@@ -1,7 +1,12 @@
 #property strict
-#property version   "2.31"
+#property version   "2.32"
 #property description "WeChuck EA – Multi-Timeframe Exhaustion & Range Scalp Strategy"
 // Changelog:
+//   v2.32 – Fixed same-second open/close on Setup C: max-profit cap (InpSetupCMaxProfitDollar)
+//           is now placed AFTER the min-hold gate instead of before it.  Previously the cap
+//           bypassed InpMinHoldSeconds and closed GOLD trades within the same second because a
+//           $5 price move on 0.03 lots was enough to reach the $15 cap instantly.  Moving it
+//           after min-hold gives the trailing stop logic time to activate first.
 //   v2.31 – Setup C entry now requires RSI confirmation in addition to Stochastic K
 //           extreme: BUY needs rsiPrev < rsiOversold AND rsiCur > rsiPrev; SELL needs
 //           rsiPrev > rsiOverbought AND rsiCur < rsiPrev.  Stochastic/ADX-based dynamic
@@ -342,8 +347,13 @@ void ManageOpenPosition(const string symbol)
 
    datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
 
+   // Minimum hold time – suppress all soft exits until elapsed (broker SL always active)
+   if(InpMinHoldSeconds > 0 && TimeCurrent() - openTime < (datetime)InpMinHoldSeconds)
+      return;
+
    // ── Setup C max-profit guard – close once floating P&L reaches the dollar cap ─
-   // Checked before the min-hold gate so the cap always fires regardless of hold time.
+   // Placed AFTER the min-hold gate so it cannot fire on the same second as entry,
+   // giving the trailing stop logic a fair chance to activate first.
    if(g_openPositionSetup == SETUP_HFT_RANGE_SCALP && InpEnableSetupC &&
       InpSetupCMaxProfitDollar > 0.0)
    {
@@ -357,10 +367,6 @@ void ManageOpenPosition(const string symbol)
          return;
       }
    }
-
-   // Minimum hold time – suppress all soft exits until elapsed (broker SL always active)
-   if(InpMinHoldSeconds > 0 && TimeCurrent() - openTime < (datetime)InpMinHoldSeconds)
-      return;
 
    // Time-based exit
    int      barsSinceOpen = iBarShift(symbol, PERIOD_M1, openTime, true);
