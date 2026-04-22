@@ -99,10 +99,14 @@ public:
       if(drawdownPct >= ddScalePct)
          m_ddScaleActive = true;
 
-      // Re-enable full lots only after the last recorded trade was a win
-      if(m_ddScaleActive && m_winBufCount > 0 &&
-         m_winBuffer[(m_winBufHead - 1 + m_rollingWindowSize) % m_rollingWindowSize] == 1)
-         m_ddScaleActive = false;
+      // Re-enable full lots only after the most recently recorded trade was a win.
+      // Guard m_winBufCount > 0 first (m_winBufHead points to the NEXT write slot).
+      if(m_ddScaleActive && m_winBufCount > 0)
+      {
+         int lastIdx = (m_winBufHead - 1 + m_rollingWindowSize) % m_rollingWindowSize;
+         if(m_winBuffer[lastIdx] == 1)
+            m_ddScaleActive = false;
+      }
 
       return m_ddScaleActive ? ddLotFactor : 1.0;
    }

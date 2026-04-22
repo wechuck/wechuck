@@ -657,6 +657,11 @@ void TryEntry(const string symbol)
    // Determine if adaptive mode is forcing stricter gates
    double rollingWR = g_risk.RollingWinRatePct();
    bool   lowWR     = (InpAdaptiveMode && rollingWR < InpAdaptiveLowWinRate);
+   if(lowWR)
+      g_logger.LogDecision(symbol, false,
+         StringFormat("Adaptive mode ACTIVE – rolling WR %.0f%% < %.0f%% threshold, "
+                      "forcing M5Stoch + RejCandle + H4Align + M15Bias ON",
+                      rollingWR, InpAdaptiveLowWinRate));
 
    StrategyParams p;
    p.adxPeriod              = InpAdxPeriod;
@@ -1064,10 +1069,12 @@ void OnTick()
 
    bool posOpen = PositionExistsForSymbol(_Symbol);
 
-   // Detect position close → record win/loss outcome for rolling win rate
+   // Detect position close → record win/loss outcome for rolling win rate.
+   // A trade is a "win" when gross profit exceeds a minimum positive threshold
+   // (avoids counting breakeven / commission-only closes as wins).
    if(g_prevPositionOpen && !posOpen)
    {
-      bool wasWin = (g_prevPositionProfit >= 0.0);
+      bool wasWin = (g_prevPositionProfit > 0.50);   // at least $0.50 net profit = true win
       g_risk.RecordTradeOutcome(wasWin);
       g_partial.OnPositionClosed();
       g_entryBoxHigh = 0.0;

@@ -274,7 +274,7 @@ private:
          }
       }
 
-      outAgeMinutes = (int)((TimeCurrent() - rates[oldestIdx].time) / 60);
+      outAgeMinutes = (int)MathRound((TimeCurrent() - rates[oldestIdx].time) / 60.0);
 
       // Count touches on the relevant wall
       for(int i = 0; i < copied; i++)
@@ -350,7 +350,8 @@ private:
       if(range <= 0.0) return false;
 
       double body = MathAbs(bar1.close - bar1.open);
-      if(body <= 0.0) return false;   // Doji – skip
+      // Near-doji: body < 2% of candle range → reject (handles floating-point near-zero cases)
+      if(body < range * 0.02) return false;
 
       if(direction == STRAT_DIR_BUY)
       {
@@ -473,8 +474,12 @@ private:
                           const bool isGold)
    {
       double interval = isGold ? 50.0 : 0.005;
-      double remainder = MathMod(price, interval);
-      double distToRound = MathMin(remainder, interval - remainder);
+      // Use rounded integer arithmetic to avoid floating-point accumulation errors.
+      // Scale price to avoid fractional intervals: multiply by 1000 for Forex (interval=5),
+      // or work directly for Gold where interval=50 is already integer-friendly.
+      double scaled    = MathRound(price / interval);
+      double nearPrice = scaled * interval;
+      double distToRound = MathAbs(price - nearPrice);
       return (distToRound <= radius);
    }
 
@@ -909,7 +914,7 @@ public:
       {
          if(CopyRates(symbol, PERIOD_M1, 1, 1, bar1) == 1)
          {
-            if((long)bar1[0].tick_volume < (long)p.minTickVolume)
+            if(bar1[0].tick_volume < (long)p.minTickVolume)
             {
                outSig.setupType = SETUP_NONE;
                outSig.direction = STRAT_DIR_NONE;
