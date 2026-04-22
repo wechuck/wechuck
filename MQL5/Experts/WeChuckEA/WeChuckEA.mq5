@@ -1,7 +1,13 @@
 #property strict
-#property version   "2.20"
+#property version   "2.30"
 #property description "WeChuck EA – Multi-Timeframe Exhaustion & Range Scalp Strategy"
 // Changelog:
+//   v2.30 – Per-setup enable/disable switches (InpEnableSetupA/B/C) for isolated
+//           backtesting. Improvement recommendations block added below.
+//   v2.20 – Setup C "HFT Range Scalp" added. Two-layer slippage protection (pre-entry
+//           + post-fill) for Setup B and C. $15 max-profit guard for Setup C.
+//           Stochastic-extreme gate moved inside A/B only; Setup C uses K-at-extreme.
+//           ADX gate for Setup C is optional (off by default). OnePipPrice() helper.
 //   v2.00 – Full strategy rework. Replaced generic score-based system with the
 //           two master setups: Setup A "Rubber Band" (high-ADX exhaustion reversal)
 //           and Setup B "Range Scalp" (low-ADX box bounce). Signal logic delegated
@@ -9,6 +15,63 @@
 //           parameters aligned to strategy spec (14,1,3). RSI added as
 //           confirmation for Setup A. Setup B TP targets opposite box wall.
 //   v1.00 – Initial release.
+//
+// ──────────────────────────────────────────────────────────────────────────────
+// IMPROVEMENT RECOMMENDATIONS (not yet implemented – future work)
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// 1. SESSION FILTER PER SETUP
+//    - Setup A (exhaustion reversal) works best during London/NY overlap where
+//      volume causes real ADX spikes. Filter it to 07:00-17:00 UTC only.
+//    - Setup C (HFT scalp) should be further restricted to avoid the first 15
+//      minutes of London open when boxes break more than they bounce.
+//    - Recommended inputs: InpSetupA_SessionStartHour, InpSetupA_SessionEndHour
+//      (and equivalent for C). Already have InpLowLiqStartHour/EndHour but it is
+//      global – per-setup session filtering would be more precise.
+//
+// 2. BREAKEVEN STOP (SETUP C)
+//    - Once Setup C profit exceeds 50% of the box range, move SL to breakeven.
+//      Prevents a winner turning into a loser on a sudden box break.
+//    - Recommended input: InpSetupC_BreakevenAtPct (default 50)
+//
+// 3. MULTI-TIMEFRAME BOX CONFIRMATION
+//    - Before entering Setup B or C, confirm the 5M box is also visible on 15M
+//      (i.e. price has been consolidating for at least 3 x 15M bars).
+//      This avoids entering boxes that are too fresh and likely to break.
+//    - Would require adding a 15M bar-consolidation check in StrategyCore.
+//
+// 4. VOLUME / TICK-DENSITY FILTER
+//    - On Setup C, if the tick count during the last 1M bar is below a threshold
+//      the "touch" may be a ghost spike with no real buyers/sellers at the wall.
+//    - Recommended input: InpSetupC_MinTicksPerBar (default 30)
+//    - Requires OnChartEvent tick counting or an auxiliary tick counter.
+//
+// 5. ATR-BASED DYNAMIC SL FOR SETUP A
+//    - Current SL uses the wick of the signal bar, which can be very tight on
+//      low-volatility symbols. Replace or blend with a 1M ATR(14) × multiplier
+//      so the SL breathes with volatility rather than being fixed to one candle.
+//    - Recommended inputs: InpSetupA_SLMode (WICK / ATR / MAX_OF_BOTH),
+//      InpSetupA_AtrMultiplier (default 1.5)
+//
+// 6. DRAWDOWN-ADAPTIVE LOT SIZING
+//    - Current dynamic lot already scales by equity. Add a second layer: if the
+//      account has lost more than X% from its peak (intra-session drawdown), cut
+//      lot size to 50% automatically until a win recovers it.
+//    - Recommended inputs: InpDDScalePct (default 5), InpDDLotFactor (default 0.5)
+//
+// 7. CORRELATION / SAME-DIRECTION GUARD
+//    - When running the EA on multiple pairs simultaneously (e.g. EURUSD + GBPAUD),
+//      prevent opening two positions in the same direction at the same time.
+//      Reduces hidden correlated drawdown.
+//    - Would need a cross-symbol position scan in CanTradeNow() inside RiskManager.
+//
+// 8. BOX INVALIDATION ON BREAK
+//    - If a new 5M candle closes outside the box while a Setup B/C position is open,
+//      the structural premise is broken. Close immediately instead of waiting for TP/SL.
+//    - Recommended input: InpCloseOnBoxBreak (default true)
+//    - Would be checked inside ManageOpenPosition().
+//
+// ──────────────────────────────────────────────────────────────────────────────
 
 #include "include/Types.mqh"
 #include "include/DiagnosticsLogger.mqh"
@@ -105,6 +168,11 @@ input group "Execution"
 input int  InpMaxDeviationPoints = 10;
 input int  InpOrderRetries       = 3;
 input bool InpAutoAttachSignal   = true;  // Attach WeChuckSignal indicator to the visual chart on init
+
+input group "Setup Enable / Disable – toggle individual setups for isolated testing"
+input bool   InpEnableSetupA          = true;   // Setup A ON/OFF (Rubber Band – high-ADX exhaustion reversal)
+input bool   InpEnableSetupB          = true;   // Setup B ON/OFF (Range Scalp – low-ADX box bounce with Stoch cross)
+// NOTE: disable A+B and enable C alone to backtest Setup C in isolation, or any combination
 
 input group "Setup C – HFT Range Scalp"
 input bool   InpEnableSetupC          = true;   // Master switch for Setup C
@@ -430,6 +498,8 @@ void TryEntry(const string symbol)
                            InpZoneWingBars,
                            InpZoneMinTouches,
                            InpZoneTolerancePct,
+                           InpEnableSetupA,
+                           InpEnableSetupB,
                            InpEnableSetupC,
                            InpSetupCRequireADX,
                            setupCMinBoxSize,
@@ -693,9 +763,11 @@ int OnInit()
    }
 
    g_logger.Log(StringFormat(
-      "EA initialized (v2.20) | SetupC=%s requireADX=%s minBox=%.1fpips slipGate=%.1fpips maxProfit=$%.2f",
+      "EA initialized (v2.30) | A=%s B=%s C=%s(adx=%s minBox=%.0fpips slip=%.1fpips maxP=$%.0f)",
+      InpEnableSetupA ? "ON" : "OFF",
+      InpEnableSetupB ? "ON" : "OFF",
       InpEnableSetupC ? "ON" : "OFF",
-      InpSetupCRequireADX ? "YES" : "NO",
+      InpSetupCRequireADX ? "ON" : "OFF",
       InpSetupCMinBoxSizePips, InpSetupCMaxSlippagePips, InpSetupCMaxProfitDollar));
    return INIT_SUCCEEDED;
 }

@@ -82,6 +82,8 @@ public:
                  const int    zoneWingBars,
                  const int    zoneMinTouches,
                  const double zoneTolerancePct,
+                 const bool   setupAEnabled,
+                 const bool   setupBEnabled,
                  const bool   setupCEnabled,
                  const bool   setupCRequireADX,
                  const double setupCMinBoxSize,
@@ -117,6 +119,8 @@ public:
       p.stochOverbought      = stochOverbought;
       p.m5RangeLookback      = m5RangeLookback;
       p.boxTouchTolerancePct = boxTolerancePct;
+      p.setupAEnabled        = setupAEnabled;
+      p.setupBEnabled        = setupBEnabled;
       p.setupCEnabled        = setupCEnabled;
       p.setupCRequireADX     = setupCRequireADX;
       p.setupCMinBoxSize     = setupCMinBoxSize;

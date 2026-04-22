@@ -51,6 +51,10 @@ struct StrategyParams
    double boxTouchTolerancePct;  // Fraction of box size – price must be within
                                  // this fraction of the edge to qualify (0.15 = 15%)
 
+   // Per-setup enable switches
+   bool   setupAEnabled;         // Master switch for Setup A (Rubber Band)
+   bool   setupBEnabled;         // Master switch for Setup B (Range Scalp)
+
    // Setup C – HFT Range Scalp
    bool   setupCEnabled;         // Master switch for Setup C
    bool   setupCRequireADX;      // When true, 5M ADX must be < adxRangingThreshold
@@ -302,7 +306,7 @@ public:
       // ── SETUP A: "The Rubber Band" ────────────────────────────────────────
       // Context : 1M ADX screaming high (> exhaustion level) AND hooking down.
       // Trigger : Stochastic crosses from extreme + RSI confirms curl-back.
-      if(adx1M > p.adxExhaustionLevel && adxHooking1M && stochAtExtreme)
+      if(p.setupAEnabled && adx1M > p.adxExhaustionLevel && adxHooking1M && stochAtExtreme)
       {
          // BUY: Stoch crossed UP from oversold  +  RSI was < 30 and is curling up
          if(StochCrossedUpFromOversold(stochK, stochKPrev, stochD, stochDPrev,
@@ -336,7 +340,7 @@ public:
       // ── SETUP B: "The Range Scalp" ────────────────────────────────────────
       // Context : 5M ADX is dead (< ranging threshold) – market is sideways.
       // Trigger : Price touches edge of 5M structural box + Stoch cross from extreme.
-      if(adx5M < p.adxRangingThreshold && stochAtExtreme)
+      if(p.setupBEnabled && adx5M < p.adxRangingThreshold && stochAtExtreme)
       {
          MqlTick tick;
          if(!SymbolInfoTick(symbol, tick)) return false;
