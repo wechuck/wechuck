@@ -1,179 +1,190 @@
 #ifndef __WECHUCK_ENTRY_SCORING_MQH__
 #define __WECHUCK_ENTRY_SCORING_MQH__
 
-#include "Types.mqh"
+//──────────────────────────────────────────────────────────────────────────────
+// EntryScoring.mqh
+// Thin adapter layer: translates EA input parameters into a StrategyParams
+// struct and delegates all signal logic to CStrategyCore (StrategyCore.mqh).
+// Handles the "No Zone, No Trade" guard using ZoneDetector.mqh.
+//──────────────────────────────────────────────────────────────────────────────
 
-#define ADX_THRESHOLD_LOW 20.0
-#define ADX_THRESHOLD_HIGH 30.0
-#define ADX_EXIT_WEAK_THRESHOLD 18.0
-#define ZSCORE_ENTRY_WEIGHT 2
-#define ZSCORE_NORMALIZATION_EXIT 0.2
-#define VOLUME_SPIKE_MULTIPLIER 1.5
+#include "Types.mqh"
+#include <WeChuck/ZoneDetector.mqh>
 
 class CEntryScoring
 {
 private:
-   bool StochCross(const string symbol, const int direction, const int kPeriod, const int dPeriod, const int slowing, bool &crossed)
+   CStrategyCore  m_core;
+   CZoneDetector  m_zones;
+
+   SRZone         m_zonesH1[];
+   SRZone         m_zonesM15[];
+   int            m_zoneCountH1;
+   int            m_zoneCountM15;
+   datetime       m_lastZoneScan;
+
+   //──────────────────────────────────────────────────────────────────────────
+   // Zone cache: rescanned at most once per hour.
+   //──────────────────────────────────────────────────────────────────────────
+   void RefreshZones(const string symbol,
+                     const int lookback, const int wingBars,
+                     const int minTouches, const double tolerancePct)
    {
-      crossed = false;
-      int stoch = iStochastic(symbol, PERIOD_M1, kPeriod, dPeriod, slowing, MODE_SMA, STO_LOWHIGH);
-      if(stoch == INVALID_HANDLE) return false;
+      datetime now = TimeCurrent();
+      if(now - m_lastZoneScan < 3600) return;
 
-      double k[3], d[3];
-      ArraySetAsSeries(k, true);
-      ArraySetAsSeries(d, true);
-      bool ok = (CopyBuffer(stoch, 0, 1, 3, k) >= 3 && CopyBuffer(stoch, 1, 1, 3, d) >= 3);
-      IndicatorRelease(stoch);
-      if(!ok) return false;
+      m_zoneCountH1  = m_zones.ScanZones(symbol, PERIOD_H1,  lookback, wingBars,
+                                          minTouches, tolerancePct, m_zonesH1);
+      m_zoneCountM15 = m_zones.ScanZones(symbol, PERIOD_M15, lookback, wingBars,
+                                          minTouches, tolerancePct, m_zonesM15);
+      m_lastZoneScan = now;
+   }
 
-      if(direction == DIR_BUY)
-         crossed = (k[1] <= d[1] && k[0] > d[0]);
-      else if(direction == DIR_SELL)
-         crossed = (k[1] >= d[1] && k[0] < d[0]);
-      return true;
+   bool PriceNearMacroZone(const double price)
+   {
+      if(m_zones.PriceNearZone(price, m_zonesH1,  m_zoneCountH1))  return true;
+      if(m_zones.PriceNearZone(price, m_zonesM15, m_zoneCountM15)) return true;
+      return false;
    }
 
 public:
+   void Init()
+   {
+      m_zoneCountH1  = 0;
+      m_zoneCountM15 = 0;
+      m_lastZoneScan = 0;
+   }
+
+   //──────────────────────────────────────────────────────────────────────────
+   // Evaluate
+   // Returns false only on a hard data error.
+   // outScore.valid distinguishes "no signal" from "signal confirmed".
+   //──────────────────────────────────────────────────────────────────────────
    bool Evaluate(const string symbol,
-                 const int direction,
-                 const int adxPeriod,
-                 const double adxThresholdLow,
-                 const double adxThresholdHigh,
-                 const int zscorePeriod,
-                 const double zscoreThreshold,
-                 const int stochK,
-                 const int stochD,
-                 const int stochSlowing,
-                 const int breakoutBars,
-                 const int volumeMaPeriod,
+                 const int    adxPeriod,
+                 const double adxExhaustionLevel,
+                 const double adxExpandingMin,
+                 const double adxExpandingMax,
+                 const double adxRangingThreshold,
+                 const double adxExitWeakThreshold,
+                 const int    rsiPeriod,
+                 const double rsiOversold,
+                 const double rsiOverbought,
+                 const int    stochK,
+                 const int    stochD,
+                 const int    stochSlowing,
+                 const double stochOversold,
+                 const double stochOverbought,
+                 const int    m5RangeLookback,
+                 const double boxTolerancePct,
+                 const bool   requireZone,
+                 const int    zoneLookback,
+                 const int    zoneWingBars,
+                 const int    zoneMinTouches,
+                 const double zoneTolerancePct,
                  EntryScoreBreakdown &outScore)
    {
-      outScore.adx = 0;
-      outScore.zscore = 0;
-      outScore.stoch = 0;
-      outScore.breakout = 0;
-      outScore.volume = 0;
-      outScore.total = 0;
-      outScore.details = "";
+      outScore.valid     = false;
+      outScore.setup     = SETUP_NONE;
+      outScore.direction = STRAT_DIR_NONE;
+      outScore.adx1M     = 0.0;
+      outScore.adx5M     = 0.0;
+      outScore.stochK    = 0.0;
+      outScore.rsiCur    = 0.0;
+      outScore.boxHigh   = 0.0;
+      outScore.boxLow    = 0.0;
+      outScore.details   = "";
 
-      int adxHandle = iADX(symbol, PERIOD_M1, adxPeriod);
-      if(adxHandle != INVALID_HANDLE)
+      StrategyParams p;
+      p.adxPeriod            = adxPeriod;
+      p.adxExhaustionLevel   = adxExhaustionLevel;
+      p.adxExpandingMin      = adxExpandingMin;
+      p.adxExpandingMax      = adxExpandingMax;
+      p.adxRangingThreshold  = adxRangingThreshold;
+      p.adxExitWeakThreshold = adxExitWeakThreshold;
+      p.rsiPeriod            = rsiPeriod;
+      p.rsiOversold          = rsiOversold;
+      p.rsiOverbought        = rsiOverbought;
+      p.stochKPeriod         = stochK;
+      p.stochDPeriod         = stochD;
+      p.stochSlowing         = stochSlowing;
+      p.stochOversold        = stochOversold;
+      p.stochOverbought      = stochOverbought;
+      p.m5RangeLookback      = m5RangeLookback;
+      p.boxTouchTolerancePct = boxTolerancePct;
+
+      StrategySignal sig;
+      if(!m_core.Evaluate(symbol, p, sig))
+         return false;
+
+      outScore.adx1M   = sig.adx1M;
+      outScore.adx5M   = sig.adx5M;
+      outScore.stochK  = sig.stochK;
+      outScore.rsiCur  = sig.rsiCur;
+      outScore.boxHigh = sig.boxHigh;
+      outScore.boxLow  = sig.boxLow;
+      outScore.details = sig.details;
+
+      if(sig.setupType == SETUP_NONE)
+         return true;
+
+      // "No Zone, No Trade" – enforced for Setup A (Rubber Band) only.
+      // Setup B already qualifies itself by the 5M box-edge proximity check.
+      if(sig.setupType == SETUP_RUBBER_BAND && requireZone)
       {
-         double adxBuf[1];
-         ArraySetAsSeries(adxBuf, true);
-         if(CopyBuffer(adxHandle, 0, 1, 1, adxBuf) >= 1)
+         RefreshZones(symbol, zoneLookback, zoneWingBars,
+                      zoneMinTouches, zoneTolerancePct);
+
+         MqlTick tick;
+         if(!SymbolInfoTick(symbol, tick)) return false;
+         double price = (tick.ask + tick.bid) * 0.5;
+
+         if(!PriceNearMacroZone(price))
          {
-            double adxVal = adxBuf[0];
-            if(adxVal >= adxThresholdHigh)      outScore.adx = 2;
-            else if(adxVal >= adxThresholdLow)  outScore.adx = 1;
+            outScore.details = "INVALIDATED – price not near H1/M15 zone (No Zone, No Trade)";
+            return true;
          }
-         IndicatorRelease(adxHandle);
       }
 
-      double closeBuf[];
-      ArrayResize(closeBuf, zscorePeriod + 2);
-      ArraySetAsSeries(closeBuf, true);
-      if(CopyClose(symbol, PERIOD_M1, 1, zscorePeriod + 1, closeBuf) >= zscorePeriod + 1)
-      {
-         double mean = 0.0;
-         for(int i = 1; i <= zscorePeriod; i++) mean += closeBuf[i];
-         mean /= zscorePeriod;
-
-         double var = 0.0;
-         for(int i = 1; i <= zscorePeriod; i++)
-         {
-            double d = closeBuf[i] - mean;
-            var += d * d;
-         }
-         double stddev = MathSqrt(var / zscorePeriod);
-         if(stddev > 0.0)
-         {
-            double z = (closeBuf[0] - mean) / stddev;
-            if(direction == DIR_BUY && z >= zscoreThreshold) outScore.zscore = ZSCORE_ENTRY_WEIGHT;
-            else if(direction == DIR_SELL && z <= -zscoreThreshold) outScore.zscore = ZSCORE_ENTRY_WEIGHT;
-         }
-      }
-
-      bool stochCrossed = false;
-      if(StochCross(symbol, direction, stochK, stochD, stochSlowing, stochCrossed) && stochCrossed)
-         outScore.stoch = 1;
-
-      MqlRates rates[];
-      ArraySetAsSeries(rates, true);
-      if(CopyRates(symbol, PERIOD_M1, 1, breakoutBars + 2, rates) >= breakoutBars + 2)
-      {
-         double hh = rates[2].high;
-         double ll = rates[2].low;
-         for(int i = 3; i <= breakoutBars + 1; i++)
-         {
-            if(rates[i].high > hh) hh = rates[i].high;
-            if(rates[i].low < ll) ll = rates[i].low;
-         }
-
-         if(direction == DIR_BUY && rates[1].close > hh) outScore.breakout = 1;
-         else if(direction == DIR_SELL && rates[1].close < ll) outScore.breakout = 1;
-      }
-
-      long vol[];
-      ArrayResize(vol, volumeMaPeriod + 2);
-      ArraySetAsSeries(vol, true);
-      if(CopyTickVolume(symbol, PERIOD_M1, 1, volumeMaPeriod + 1, vol) >= volumeMaPeriod + 1)
-      {
-         double avg = 0.0;
-         for(int i = 1; i <= volumeMaPeriod; i++) avg += (double)vol[i];
-         avg /= volumeMaPeriod;
-         if(avg > 0.0 && (double)vol[0] > VOLUME_SPIKE_MULTIPLIER * avg) outScore.volume = 1;
-      }
-
-      outScore.total = outScore.adx + outScore.zscore + outScore.stoch + outScore.breakout + outScore.volume;
-      outScore.details = StringFormat("adx=%d,z=%d,stoch=%d,breakout=%d,vol=%d,total=%d",
-                                      outScore.adx, outScore.zscore, outScore.stoch, outScore.breakout, outScore.volume, outScore.total);
+      outScore.valid     = true;
+      outScore.setup     = sig.setupType;
+      outScore.direction = sig.direction;
       return true;
    }
 
-   bool ShouldExitByDynamics(const string symbol, const int positionDirection, const int stochK, const int stochD, const int stochSlowing, const int zscorePeriod, const int adxPeriod, const double adxExitWeakThreshold)
+   //──────────────────────────────────────────────────────────────────────────
+   // ShouldExitByDynamics – delegates to CStrategyCore.ShouldExit()
+   //──────────────────────────────────────────────────────────────────────────
+   bool ShouldExitByDynamics(const string symbol,
+                              const int    positionDirection,
+                              const int    adxPeriod,
+                              const double adxExitWeakThreshold,
+                              const int    stochK,
+                              const int    stochD,
+                              const int    stochSlowing,
+                              const double stochOversold,
+                              const double stochOverbought)
    {
-      int opposite = (positionDirection == DIR_BUY ? DIR_SELL : DIR_BUY);
-      bool cross = false;
-      bool stochExit = StochCross(symbol, opposite, stochK, stochD, stochSlowing, cross) && cross;
+      StrategyParams p;
+      p.adxPeriod            = adxPeriod;
+      p.adxExhaustionLevel   = 40.0;
+      p.adxExpandingMin      = 25.0;
+      p.adxExpandingMax      = 35.0;
+      p.adxRangingThreshold  = 20.0;
+      p.adxExitWeakThreshold = adxExitWeakThreshold;
+      p.rsiPeriod            = 14;
+      p.rsiOversold          = 30.0;
+      p.rsiOverbought        = 70.0;
+      p.stochKPeriod         = stochK;
+      p.stochDPeriod         = stochD;
+      p.stochSlowing         = stochSlowing;
+      p.stochOversold        = stochOversold;
+      p.stochOverbought      = stochOverbought;
+      p.m5RangeLookback      = 50;
+      p.boxTouchTolerancePct = 0.15;
 
-      bool adxWeak = false;
-      int adxHandle = iADX(symbol, PERIOD_M1, adxPeriod);
-      if(adxHandle != INVALID_HANDLE)
-      {
-         double adxBuf[1];
-         ArraySetAsSeries(adxBuf, true);
-         if(CopyBuffer(adxHandle, 0, 1, 1, adxBuf) >= 1)
-            adxWeak = (adxBuf[0] < adxExitWeakThreshold);
-         IndicatorRelease(adxHandle);
-      }
-
-      bool zNorm = false;
-      double closeBuf[];
-      ArrayResize(closeBuf, zscorePeriod + 2);
-      ArraySetAsSeries(closeBuf, true);
-      if(CopyClose(symbol, PERIOD_M1, 1, zscorePeriod + 1, closeBuf) >= zscorePeriod + 1)
-      {
-         double mean = 0.0;
-         for(int i = 1; i <= zscorePeriod; i++) mean += closeBuf[i];
-         mean /= zscorePeriod;
-
-         double var = 0.0;
-         for(int i = 1; i <= zscorePeriod; i++)
-         {
-            double d = closeBuf[i] - mean;
-            var += d * d;
-         }
-         double stddev = MathSqrt(var / zscorePeriod);
-         if(stddev > 0.0)
-         {
-            double z = (closeBuf[0] - mean) / stddev;
-            zNorm = (MathAbs(z) < ZSCORE_NORMALIZATION_EXIT);
-         }
-      }
-
-      return (stochExit || zNorm || adxWeak);
+      return m_core.ShouldExit(symbol, positionDirection, p);
    }
 };
 
-#endif
+#endif // __WECHUCK_ENTRY_SCORING_MQH__
