@@ -79,6 +79,7 @@ int            g_zoneCountM15 = 0;
 
 datetime       g_lastBarTime   = 0;
 datetime       g_lastZoneScan  = 0;
+datetime       g_lastRefresh   = 0;   // throttle: one full evaluation per second
 int            g_arrowIndex    = 0;
 
 //──────────────────────────────────────────────────────────────────────────────
@@ -301,8 +302,10 @@ void DrawZones()
    DeleteByPrefix(PFX_ZONE_H1);
    DeleteByPrefix(PFX_ZONE_M15);
 
-   datetime t1 = iTime(_Symbol, PERIOD_M1, 0);
-   datetime t0 = t1 - (datetime)(7 * 86400);   // extend 1 week to the left
+   // Extend zones 4 hours ahead of current time so they always reach the current bar
+   datetime now = TimeCurrent();
+   datetime t1  = now + (datetime)(4 * 3600);
+   datetime t0  = now - (datetime)(7 * 86400);
 
    // H1 zones – yellow
    for(int i = 0; i < g_zoneCountH1; i++)
@@ -396,7 +399,7 @@ void OnDeinit(const int reason)
 }
 
 //──────────────────────────────────────────────────────────────────────────────
-// OnCalculate – runs on every tick; logic executes only on new M1 bar close
+// OnCalculate – panel and box lines refresh every second; arrows only on new bar
 //──────────────────────────────────────────────────────────────────────────────
 int OnCalculate(const int rates_total,   const int prev_calculated,
                 const datetime &time[],  const double &open[],
@@ -404,9 +407,10 @@ int OnCalculate(const int rates_total,   const int prev_calculated,
                 const double &close[],   const long &tick_volume[],
                 const long &volume[],    const int &spread[])
 {
-   datetime curBarTime = iTime(_Symbol, PERIOD_M1, 0);
-   if(curBarTime == g_lastBarTime) return rates_total;
-   g_lastBarTime = curBarTime;
+   // Throttle to one evaluation per second to avoid excessive CPU load
+   datetime nowSec = TimeCurrent();
+   if(nowSec == g_lastRefresh) return rates_total;
+   g_lastRefresh = nowSec;
 
    // Re-scan zones every hour so the overlay stays current
    if(TimeCurrent() - g_lastZoneScan >= 3600)
@@ -416,30 +420,34 @@ int OnCalculate(const int rates_total,   const int prev_calculated,
       g_lastZoneScan = TimeCurrent();
    }
 
-   // Evaluate strategy signal
+   // Evaluate strategy signal (runs every second – panel always current)
    StrategySignal sig;
    if(!g_core.Evaluate(_Symbol, g_params, sig))
       return rates_total;
 
-   // Update 5M range box lines
+   // Always refresh: 5M range box lines and the panel widget
    DrawRangeBox(sig.boxHigh, sig.boxLow);
-
-   // Refresh the panel widget
    UpdatePanel(sig);
 
-   // Draw signal arrow on the closed bar that generated the signal
-   if(sig.setupType != SETUP_NONE && sig.direction != STRAT_DIR_NONE)
+   // Draw signal arrows only on a new M1 bar close
+   datetime curBarTime = iTime(_Symbol, PERIOD_M1, 0);
+   if(curBarTime != g_lastBarTime)
    {
-      datetime signalBarTime = iTime(_Symbol, PERIOD_M1, 1);
-      MqlRates r[1];
-      ArraySetAsSeries(r, true);
-      if(CopyRates(_Symbol, PERIOD_M1, 1, 1, r) == 1)
+      g_lastBarTime = curBarTime;
+
+      if(sig.setupType != SETUP_NONE && sig.direction != STRAT_DIR_NONE)
       {
-         double point      = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-         double arrowPrice = (sig.direction == STRAT_DIR_BUY)
-                             ? r[0].low  - 5.0 * point
-                             : r[0].high + 5.0 * point;
-         DrawArrow(signalBarTime, arrowPrice, sig.direction, sig.setupType);
+         datetime signalBarTime = iTime(_Symbol, PERIOD_M1, 1);
+         MqlRates r[1];
+         ArraySetAsSeries(r, true);
+         if(CopyRates(_Symbol, PERIOD_M1, 1, 1, r) == 1)
+         {
+            double point      = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+            double arrowPrice = (sig.direction == STRAT_DIR_BUY)
+                                ? r[0].low  - 5.0 * point
+                                : r[0].high + 5.0 * point;
+            DrawArrow(signalBarTime, arrowPrice, sig.direction, sig.setupType);
+         }
       }
    }
 

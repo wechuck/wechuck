@@ -27,6 +27,8 @@ struct EntryScoreBreakdown
    double    rsiCur;
    double    boxHigh;
    double    boxLow;
+   double    signalBarHigh;   // 1M bar[1] high – for wick-based SL placement
+   double    signalBarLow;    // 1M bar[1] low  – for wick-based SL placement
    string    details;
 };
 

@@ -92,16 +92,19 @@ input double InpEquityScaleStart = 300.0;
 input double InpEquityScaleFull  = 5000.0;
 
 input group "Stops and Targets"
-input double InpForexSlPips         = 8.0;
-input int    InpGoldSlPoints        = 150;
-input double InpRiskReward          = 1.3;   // Used for Setup A TP (Setup B TP = opposite box side)
-input int    InpTimeExitBars        = 15;
-input double InpTrailingStartPips   = 5.0;
-input double InpTrailingDistancePips = 3.0;
+input double InpSlBufferPips         = 2.0;   // Extra pips beyond wick/box edge when placing SL
+input double InpFallbackSlPips       = 8.0;   // Minimum SL pips (forex) / fallback when bar data missing
+input int    InpGoldSlPoints         = 150;   // Minimum SL points for gold / fallback
+input double InpRRMin                = 4.7;   // R:R multiple at which trailing stop activates (conservative TP)
+input double InpRRMax                = 10.0;  // R:R multiple for hard TP on Setup A
+input int    InpTimeExitBars         = 15;    // Force close after N 1M bars
+input int    InpMinHoldSeconds       = 60;    // Suppress all soft exits for N seconds after entry
+input double InpTrailingDistancePips = 3.0;   // Trail step size (pips) once RRMin profit is reached
 
 input group "Execution"
-input int InpMaxDeviationPoints = 10;
-input int InpOrderRetries       = 3;
+input int  InpMaxDeviationPoints = 10;
+input int  InpOrderRetries       = 3;
+input bool InpAutoAttachSignal   = true;  // Attach WeChuckSignal indicator to the visual chart on init
 
 //──────────────────────────────────────────────────────────────────────────────
 // Globals
@@ -208,7 +211,7 @@ double GetScaledDailyLossCapPct(const double equity)
    return LinearScaleEquity(equity, InpDailyLossCapHighPct, InpDailyLossCapLowPct);
 }
 
-double ComputeLotSize(const string symbol)
+double ComputeLotSize(const string symbol, const int slPoints)
 {
    if(!InpUseDynamicLot) return InpFixedLot;
    double equity       = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -217,7 +220,6 @@ double ComputeLotSize(const string symbol)
    double point        = SymbolInfoDouble(symbol, SYMBOL_POINT);
    double tickSize     = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
    double tickValue    = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
-   int    slPoints     = IsGold(symbol) ? InpGoldSlPoints : ForexPipsToPoints(symbol, InpForexSlPips);
    if(tickSize <= 0.0 || point <= 0.0) return InpFixedLot;
    double pointValuePerLot = (point / tickSize) * tickValue;
    if(pointValuePerLot <= 0.0) return InpFixedLot;
@@ -245,8 +247,13 @@ void ManageOpenPosition(const string symbol)
    long posType = PositionGetInteger(POSITION_TYPE);
    int  dir     = (posType == POSITION_TYPE_BUY) ? STRAT_DIR_BUY : STRAT_DIR_SELL;
 
+   datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+
+   // Minimum hold time – suppress all soft exits until elapsed (broker SL always active)
+   if(InpMinHoldSeconds > 0 && TimeCurrent() - openTime < (datetime)InpMinHoldSeconds)
+      return;
+
    // Time-based exit
-   datetime openTime    = (datetime)PositionGetInteger(POSITION_TIME);
    int      barsSinceOpen = iBarShift(symbol, PERIOD_M1, openTime, true);
    if(barsSinceOpen >= InpTimeExitBars && InpTimeExitBars > 0)
    {
@@ -268,24 +275,25 @@ void ManageOpenPosition(const string symbol)
       return;
    }
 
-   // Trailing stop
+   // R:R-aware trailing stop – activates once profit reaches InpRRMin × entry SL distance
+   double openPrice    = PositionGetDouble(POSITION_PRICE_OPEN);
+   double entrySL      = PositionGetDouble(POSITION_SL);
+   double currentSL    = entrySL;
+   double currentTP    = PositionGetDouble(POSITION_TP);
+   double slDist       = MathAbs(openPrice - entrySL);
+   double trailTrigger = slDist * InpRRMin;   // e.g. 4.7× SL distance
+
    double point        = SymbolInfoDouble(symbol, SYMBOL_POINT);
-   double trailingStart = (IsGold(symbol) ? InpTrailingStartPips * 10.0
-                                          : ForexPipsToPoints(symbol, InpTrailingStartPips)) * point;
-   double trailingDist  = (IsGold(symbol) ? InpTrailingDistancePips * 10.0
-                                          : ForexPipsToPoints(symbol, InpTrailingDistancePips)) * point;
+   double trailingDist = (IsGold(symbol) ? InpTrailingDistancePips * 10.0
+                                         : ForexPipsToPoints(symbol, InpTrailingDistancePips)) * point;
 
    MqlTick tick;
    if(!SymbolInfoTick(symbol, tick)) return;
 
-   double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-   double currentSL = PositionGetDouble(POSITION_SL);
-   double currentTP = PositionGetDouble(POSITION_TP);
-
    if(dir == STRAT_DIR_BUY)
    {
       double profitMove = tick.bid - openPrice;
-      if(profitMove >= trailingStart)
+      if(slDist > 0.0 && profitMove >= trailTrigger)
       {
          double newSL = tick.bid - trailingDist;
          if(newSL > currentSL)
@@ -295,7 +303,7 @@ void ManageOpenPosition(const string symbol)
    else
    {
       double profitMove = openPrice - tick.ask;
-      if(profitMove >= trailingStart)
+      if(slDist > 0.0 && profitMove >= trailTrigger)
       {
          double newSL = tick.ask + trailingDist;
          if(currentSL == 0.0 || newSL < currentSL)
@@ -431,15 +439,60 @@ void TryEntry(const string symbol)
    // ── Compute price levels ──────────────────────────────────────────────────
    MqlTick tick;
    if(!SymbolInfoTick(symbol, tick)) return;
-   double point   = SymbolInfoDouble(symbol, SYMBOL_POINT);
-   int    slPoints = IsGold(symbol) ? InpGoldSlPoints : ForexPipsToPoints(symbol, InpForexSlPips);
-   double price   = (score.direction == STRAT_DIR_BUY) ? tick.ask : tick.bid;
-   double sl      = (score.direction == STRAT_DIR_BUY)
-                    ? price - slPoints * point
-                    : price + slPoints * point;
+   double point  = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   double price  = (score.direction == STRAT_DIR_BUY) ? tick.ask : tick.bid;
 
-   // Setup B TP = opposite side of the 5M structural box.
-   // Setup A TP = fixed risk-to-reward ratio from the SL distance.
+   // Pip-sized buffer beyond the wick / box edge
+   int    slBufPoints = IsGold(symbol)
+                        ? (int)(InpSlBufferPips * 10.0)
+                        : ForexPipsToPoints(symbol, InpSlBufferPips);
+   double slBuf       = slBufPoints * point;
+
+   // Minimum SL distance (prevents oversized lots when wick is very tight)
+   int    minSlPoints = IsGold(symbol)
+                        ? InpGoldSlPoints
+                        : ForexPipsToPoints(symbol, InpFallbackSlPips);
+   double minSlDist   = minSlPoints * point;
+
+   // ── SL Placement ──────────────────────────────────────────────────────────
+   double sl;
+   if(score.setup == SETUP_RUBBER_BAND &&
+      score.signalBarHigh > 0.0 && score.signalBarLow > 0.0)
+   {
+      // Setup A – SL just beyond the exhaustion sweep wick of the signal bar
+      sl = (score.direction == STRAT_DIR_BUY)
+           ? score.signalBarLow  - slBuf
+           : score.signalBarHigh + slBuf;
+   }
+   else if(score.setup == SETUP_RANGE_SCALP &&
+           score.boxHigh > 0.0 && score.boxLow > 0.0)
+   {
+      // Setup B – SL just outside the 5M structural box edge
+      sl = (score.direction == STRAT_DIR_BUY)
+           ? score.boxLow  - slBuf
+           : score.boxHigh + slBuf;
+   }
+   else
+   {
+      // Fallback – fixed pip distance
+      sl = (score.direction == STRAT_DIR_BUY)
+           ? price - minSlDist
+           : price + minSlDist;
+   }
+
+   // Enforce minimum SL distance (avoids dangerously large lots from tiny wicks)
+   double slDist = MathAbs(price - sl);
+   if(slDist < minSlDist)
+   {
+      sl    = (score.direction == STRAT_DIR_BUY) ? price - minSlDist : price + minSlDist;
+      slDist = minSlDist;
+   }
+   int slPoints = (int)MathRound(slDist / point);
+   if(slPoints < 1) slPoints = 1;
+
+   // ── TP Placement ──────────────────────────────────────────────────────────
+   // Setup B: opposite box wall (natural range target).
+   // Setup A: hard TP at InpRRMax × SL distance; trailing activates at InpRRMin.
    double tp;
    if(score.setup == SETUP_RANGE_SCALP &&
       score.boxHigh > 0.0 && score.boxLow > 0.0)
@@ -448,15 +501,14 @@ void TryEntry(const string symbol)
    }
    else
    {
-      double tpDistancePoints = slPoints * InpRiskReward;
       tp = (score.direction == STRAT_DIR_BUY)
-           ? price + tpDistancePoints * point
-           : price - tpDistancePoints * point;
+           ? price + slDist * InpRRMax
+           : price - slDist * InpRRMax;
    }
 
    // ── Execute ───────────────────────────────────────────────────────────────
    g_orderInFlight = true;
-   double lotSize = ComputeLotSize(symbol);
+   double lotSize = ComputeLotSize(symbol, slPoints);
    bool   opened  = g_exec.Open(symbol, score.direction, lotSize,
                                 InpMaxDeviationPoints, InpOrderRetries,
                                 sl, tp, g_logger);
@@ -494,7 +546,36 @@ int OnInit()
       return INIT_FAILED;
    }
 
-   g_logger.Log("EA initialized (v2.00 – Exhaustion & Range Scalp Strategy)");
+   // Attach WeChuckSignal to the visual chart so the dashboard is visible in
+   // both live trading and Strategy Tester visual mode.
+   if(InpAutoAttachSignal)
+   {
+      bool alreadyAttached = false;
+      int  indTotal = ChartIndicatorsTotal(ChartID(), 0);
+      for(int i = 0; i < indTotal; i++)
+      {
+         if(StringFind(ChartIndicatorName(ChartID(), 0, i), "WeChuckSignal") >= 0)
+         { alreadyAttached = true; break; }
+      }
+      if(!alreadyAttached)
+      {
+         int sigHandle = iCustom(_Symbol, PERIOD_M1, "WeChuck\\WeChuckSignal",
+                                 InpAdxPeriod, InpAdxExhaustionLevel,
+                                 InpAdxExpandingMin, InpAdxExpandingMax,
+                                 InpAdxRangingThreshold, InpAdxExitWeakThreshold,
+                                 InpRsiPeriod, InpRsiOversold, InpRsiOverbought,
+                                 InpStochK, InpStochD, InpStochSlowing,
+                                 InpStochOversold, InpStochOverbought,
+                                 InpM5RangeLookback, InpBoxTolerancePct,
+                                 InpZoneLookback, InpZoneWingBars,
+                                 InpZoneMinTouches, InpZoneTolerancePct,
+                                 (int)CORNER_LEFT_UPPER, 12, 22);
+         if(sigHandle != INVALID_HANDLE)
+            ChartIndicatorAdd(ChartID(), 0, sigHandle);
+      }
+   }
+
+   g_logger.Log("EA initialized (v2.10 – Exhaustion & Range Scalp Strategy)");
    return INIT_SUCCEEDED;
 }
 

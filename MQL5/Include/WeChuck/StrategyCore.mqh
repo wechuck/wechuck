@@ -55,19 +55,21 @@ struct StrategyParams
 struct StrategySignal
 {
    SetupType setupType;
-   int       direction;    // STRAT_DIR_BUY / STRAT_DIR_SELL / STRAT_DIR_NONE
-   double    adx1M;        // Last closed 1M ADX value
-   double    adx1MPrev;    // 1M ADX one bar prior (for hook & expanding detection)
-   bool      adxHooking;   // True when 1M ADX just turned down from its peak
-   double    adx5M;        // Last closed 5M ADX value
-   double    stochK;       // Last closed Stochastic %K
-   double    stochKPrev;   // %K one bar prior
-   double    stochD;       // Last closed Stochastic %D
-   double    rsiCur;       // Last closed RSI
-   double    rsiPrev;      // RSI one bar prior
-   double    boxHigh;      // 5M range box upper boundary
-   double    boxLow;       // 5M range box lower boundary
-   string    details;      // Human-readable reason string for logging
+   int       direction;       // STRAT_DIR_BUY / STRAT_DIR_SELL / STRAT_DIR_NONE
+   double    adx1M;           // Last closed 1M ADX value
+   double    adx1MPrev;       // 1M ADX one bar prior (for hook & expanding detection)
+   bool      adxHooking;      // True when 1M ADX just turned down from its peak
+   double    adx5M;           // Last closed 5M ADX value
+   double    stochK;          // Last closed Stochastic %K
+   double    stochKPrev;      // %K one bar prior
+   double    stochD;          // Last closed Stochastic %D
+   double    rsiCur;          // Last closed RSI
+   double    rsiPrev;         // RSI one bar prior
+   double    boxHigh;         // 5M range box upper boundary
+   double    boxLow;          // 5M range box lower boundary
+   double    signalBarHigh;   // 1M bar[1] high – EA uses this for wick-based SL (Setup A)
+   double    signalBarLow;    // 1M bar[1] low  – EA uses this for wick-based SL (Setup A)
+   string    details;         // Human-readable reason string for logging
 };
 
 // ── Core class ────────────────────────────────────────────────────────────────
@@ -212,20 +214,22 @@ public:
                  StrategySignal &outSig)
    {
       // Initialise output
-      outSig.setupType  = SETUP_NONE;
-      outSig.direction  = STRAT_DIR_NONE;
-      outSig.adx1M      = 0.0;
-      outSig.adx1MPrev  = 0.0;
-      outSig.adxHooking = false;
-      outSig.adx5M      = 0.0;
-      outSig.stochK     = 0.0;
-      outSig.stochKPrev = 0.0;
-      outSig.stochD     = 0.0;
-      outSig.rsiCur     = 0.0;
-      outSig.rsiPrev    = 0.0;
-      outSig.boxHigh    = 0.0;
-      outSig.boxLow     = 0.0;
-      outSig.details    = "";
+      outSig.setupType    = SETUP_NONE;
+      outSig.direction    = STRAT_DIR_NONE;
+      outSig.adx1M        = 0.0;
+      outSig.adx1MPrev    = 0.0;
+      outSig.adxHooking   = false;
+      outSig.adx5M        = 0.0;
+      outSig.stochK       = 0.0;
+      outSig.stochKPrev   = 0.0;
+      outSig.stochD       = 0.0;
+      outSig.rsiCur       = 0.0;
+      outSig.rsiPrev      = 0.0;
+      outSig.boxHigh      = 0.0;
+      outSig.boxLow       = 0.0;
+      outSig.signalBarHigh = 0.0;
+      outSig.signalBarLow  = 0.0;
+      outSig.details      = "";
 
       // ── Read all indicators ───────────────────────────────────────────────
       double adx1M, adx1MPrev, adx5M, adx5MPrev;
@@ -261,6 +265,15 @@ public:
       outSig.rsiPrev    = rsiPrev;
       outSig.boxHigh    = boxHigh;
       outSig.boxLow     = boxLow;
+
+      // Signal bar (bar[1]) OHLC – used by the EA to place SL just beyond the sweep wick
+      MqlRates bar1[1];
+      ArraySetAsSeries(bar1, true);
+      if(CopyRates(symbol, PERIOD_M1, 1, 1, bar1) == 1)
+      {
+         outSig.signalBarHigh = bar1[0].high;
+         outSig.signalBarLow  = bar1[0].low;
+      }
 
       // ── Invalidation Gate ─────────────────────────────────────────────────
       // "If 1M/5M ADX is going 25→30→35 aggressively, we wait."

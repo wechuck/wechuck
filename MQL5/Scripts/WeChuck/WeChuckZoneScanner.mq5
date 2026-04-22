@@ -21,6 +21,9 @@ input int    InpM5Lookback        = 50;     // Closed 5M bars that define the bo
 input group "ADX State Display"
 input int    InpAdxPeriod         = 14;
 
+input group "Refresh"
+input int    InpRefreshSeconds    = 0;      // 0 = run once; >0 = auto-refresh every N seconds
+
 //──────────────────────────────────────────────────────────────────────────────
 // Object-name prefix – all drawings created by this script use this prefix
 // so they can be selectively deleted and redrawn without touching other objects.
@@ -47,8 +50,10 @@ void DeletePreviousObjects()
 void DrawZoneRect(const string name, const double hi, const double lo,
                   const color clr, const string tooltip)
 {
-   datetime t1 = iTime(_Symbol, PERIOD_M1, 0);
-   datetime t0 = t1 - (datetime)(7 * 86400);
+   // Extend 4 hours ahead so zones always reach the current bar
+   datetime now = TimeCurrent();
+   datetime t1  = now + (datetime)(4 * 3600);
+   datetime t0  = now - (datetime)(7 * 86400);
 
    if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0, t0, hi, t1, lo))
       return;
@@ -94,11 +99,13 @@ string GetAdxStateStr(double &outAdxVal)
 //──────────────────────────────────────────────────────────────────────────────
 void OnStart()
 {
-   // Step 1: remove any prior scan objects (idempotent)
-   DeletePreviousObjects();
-   Print("[WeChuckZoneScanner] Starting zone scan on ", _Symbol, " ...");
+   do
+   {
+      // Step 1: remove any prior scan objects (idempotent)
+      DeletePreviousObjects();
+      Print("[WeChuckZoneScanner] Starting zone scan on ", _Symbol, " ...");
 
-   CZoneDetector detector;
+      CZoneDetector detector;
 
    // Step 2: scan H1, M15, M5
    SRZone zonesH1[], zonesM15[], zonesM5[];
@@ -174,4 +181,9 @@ void OnStart()
 
    ChartRedraw(0);
    Print("[WeChuckZoneScanner] Done. ", allCount + m5Count, " zone objects drawn on chart.");
+
+   if(InpRefreshSeconds > 0 && !IsStopped())
+      Sleep(InpRefreshSeconds * 1000);
+
+   } while(InpRefreshSeconds > 0 && !IsStopped());
 }

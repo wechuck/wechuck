@@ -93,6 +93,8 @@ public:
       outScore.rsiCur    = 0.0;
       outScore.boxHigh   = 0.0;
       outScore.boxLow    = 0.0;
+      outScore.signalBarHigh = 0.0;
+      outScore.signalBarLow  = 0.0;
       outScore.details   = "";
 
       StrategyParams p;
@@ -123,6 +125,8 @@ public:
       outScore.rsiCur  = sig.rsiCur;
       outScore.boxHigh = sig.boxHigh;
       outScore.boxLow  = sig.boxLow;
+      outScore.signalBarHigh = sig.signalBarHigh;
+      outScore.signalBarLow  = sig.signalBarLow;
       outScore.details = sig.details;
 
       if(sig.setupType == SETUP_NONE)
