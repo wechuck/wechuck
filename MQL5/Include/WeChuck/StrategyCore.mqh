@@ -397,7 +397,7 @@ public:
             if(boxRange >= p.setupCMinBoxSize && boxRange > 0.0)
             {
                // Price must be inside the box at this bar\'s open
-               if(midPrice > boxLow && midPrice < boxHigh)
+               if(midPrice >= boxLow && midPrice <= boxHigh)
                {
                   double tolerance = boxRange * p.boxTouchTolerancePct;
 

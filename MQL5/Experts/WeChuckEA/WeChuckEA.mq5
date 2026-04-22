@@ -1,5 +1,5 @@
 #property strict
-#property version   "2.00"
+#property version   "2.20"
 #property description "WeChuck EA – Multi-Timeframe Exhaustion & Range Scalp Strategy"
 // Changelog:
 //   v2.00 – Full strategy rework. Replaced generic score-based system with the
