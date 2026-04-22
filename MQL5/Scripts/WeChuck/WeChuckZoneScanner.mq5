@@ -79,7 +79,7 @@ string GetAdxStateStr(double &outAdxVal)
       if(outAdxVal < 20.0)
          state = "RANGING (<20)";
       else if(outAdxVal <= 35.0 && rising)
-         state = "EXPANDING (25-35 rising)";
+         state = "EXPANDING (20-35 rising)";
       else if(outAdxVal > 40.0 && buf[1] > buf[2] && buf[0] < buf[1])
          state = "EXHAUSTED (>40 hooking)";
       else

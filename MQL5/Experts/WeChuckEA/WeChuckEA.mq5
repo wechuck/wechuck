@@ -1,6 +1,14 @@
 #property strict
 #property version   "2.00"
 #property description "WeChuck EA – Multi-Timeframe Exhaustion & Range Scalp Strategy"
+// Changelog:
+//   v2.00 – Full strategy rework. Replaced generic score-based system with the
+//           two master setups: Setup A "Rubber Band" (high-ADX exhaustion reversal)
+//           and Setup B "Range Scalp" (low-ADX box bounce). Signal logic delegated
+//           to StrategyCore.mqh. Zone gating via ZoneDetector.mqh. Stochastic
+//           parameters aligned to strategy spec (14,1,3). RSI added as
+//           confirmation for Setup A. Setup B TP targets opposite box wall.
+//   v1.00 – Initial release.
 
 #include "include/Types.mqh"
 #include "include/DiagnosticsLogger.mqh"
