@@ -12,10 +12,10 @@ enum TradeDirection
 };
 
 // Entry result from the strategy signal evaluation.
-// 'valid'     – true when a confirmed Setup A or Setup B signal fired.
-// 'setup'     – which setup triggered (SETUP_RUBBER_BAND / SETUP_RANGE_SCALP).
+// 'valid'     – true when a confirmed Setup A, B, or C signal fired.
+// 'setup'     – which setup triggered (SETUP_RUBBER_BAND / SETUP_RANGE_SCALP / SETUP_HFT_RANGE_SCALP).
 // 'direction' – STRAT_DIR_BUY or STRAT_DIR_SELL (compatible with TradeDirection).
-// 'boxHigh' / 'boxLow' – 5M structural box boundaries (used for Setup B TP).
+// 'boxHigh' / 'boxLow' – 5M structural box boundaries (used for Setup B/C TP).
 struct EntryScoreBreakdown
 {
    bool      valid;

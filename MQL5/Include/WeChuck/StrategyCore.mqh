@@ -17,9 +17,10 @@
 
 enum SetupType
 {
-   SETUP_NONE        = 0,  // No valid signal
-   SETUP_RUBBER_BAND = 1,  // Setup A – high ADX exhaustion reversal
-   SETUP_RANGE_SCALP = 2   // Setup B – low ADX range bounce
+   SETUP_NONE           = 0,  // No valid signal
+   SETUP_RUBBER_BAND    = 1,  // Setup A – high ADX exhaustion reversal
+   SETUP_RANGE_SCALP    = 2,  // Setup B – low ADX range bounce (with Stoch cross)
+   SETUP_HFT_RANGE_SCALP = 3  // Setup C – HFT box-touch scalp (no Stoch cross required)
 };
 
 // ── Parameter bundle ─────────────────────────────────────────────────────────
@@ -49,6 +50,11 @@ struct StrategyParams
    int    m5RangeLookback;       // Bars of 5M history to define the box
    double boxTouchTolerancePct;  // Fraction of box size – price must be within
                                  // this fraction of the edge to qualify (0.15 = 15%)
+
+   // Setup C – HFT Range Scalp
+   bool   setupCEnabled;         // Master switch for Setup C
+   bool   setupCRequireADX;      // When true, 5M ADX must be < adxRangingThreshold
+   double setupCMinBoxSize;      // Minimum box range in price units (pre-converted from pips)
 };
 
 // ── Signal output ─────────────────────────────────────────────────────────────
@@ -277,7 +283,7 @@ public:
 
       // ── Invalidation Gate ─────────────────────────────────────────────────
       // "If 1M/5M ADX is going 25→30→35 aggressively, we wait."
-      // Condition: 1M ADX is within the expanding zone AND still rising.
+      // Applies to all setups: a strongly expanding trend is not a range.
       bool adxExpanding = (adx1M >= p.adxExpandingMin &&
                            adx1M <= p.adxExpandingMax &&
                            adx1M > adx1MPrev);
@@ -289,21 +295,14 @@ public:
          return true;  // valid evaluation; signal remains SETUP_NONE
       }
 
-      // ── Invalidation: Stochastic not at an extreme ─────────────────────
-      // "If Stochastic is floating at 50, we do not enter."
+      // Stochastic extreme flag – required by Setup A and B but NOT by Setup C.
       bool stochAtExtreme = (stochKPrev <= p.stochOversold ||
                              stochKPrev >= p.stochOverbought);
-      if(!stochAtExtreme)
-      {
-         outSig.details = StringFormat(
-            "INVALIDATED – Stoch not at extreme (K prev=%.1f)", stochKPrev);
-         return true;
-      }
 
       // ── SETUP A: "The Rubber Band" ────────────────────────────────────────
       // Context : 1M ADX screaming high (> exhaustion level) AND hooking down.
       // Trigger : Stochastic crosses from extreme + RSI confirms curl-back.
-      if(adx1M > p.adxExhaustionLevel && adxHooking1M)
+      if(adx1M > p.adxExhaustionLevel && adxHooking1M && stochAtExtreme)
       {
          // BUY: Stoch crossed UP from oversold  +  RSI was < 30 and is curling up
          if(StochCrossedUpFromOversold(stochK, stochKPrev, stochD, stochDPrev,
@@ -337,45 +336,94 @@ public:
       // ── SETUP B: "The Range Scalp" ────────────────────────────────────────
       // Context : 5M ADX is dead (< ranging threshold) – market is sideways.
       // Trigger : Price touches edge of 5M structural box + Stoch cross from extreme.
-      if(adx5M < p.adxRangingThreshold)
+      if(adx5M < p.adxRangingThreshold && stochAtExtreme)
       {
          MqlTick tick;
          if(!SymbolInfoTick(symbol, tick)) return false;
          double midPrice = (tick.ask + tick.bid) * 0.5;
 
          double boxRange = boxHigh - boxLow;
-         if(boxRange <= 0.0)
+         if(boxRange > 0.0)
          {
-            outSig.details = "SETUP B skipped – box range is zero";
-            return true;
+            double tolerance = boxRange * p.boxTouchTolerancePct;
+
+            // BUY: price touching / near the BOTTOM of the box
+            if(midPrice <= boxLow + tolerance &&
+               StochCrossedUpFromOversold(stochK, stochKPrev, stochD, stochDPrev,
+                                          p.stochOversold))
+            {
+               outSig.setupType = SETUP_RANGE_SCALP;
+               outSig.direction = STRAT_DIR_BUY;
+               outSig.details   = StringFormat(
+                  "SETUP B BUY | adx5M=%.1f price=%.5f boxLow=%.5f stochK=%.1f",
+                  adx5M, midPrice, boxLow, stochK);
+               return true;
+            }
+
+            // SELL: price touching / near the TOP of the box
+            if(midPrice >= boxHigh - tolerance &&
+               StochCrossedDownFromOverbought(stochK, stochKPrev, stochD, stochDPrev,
+                                              p.stochOverbought))
+            {
+               outSig.setupType = SETUP_RANGE_SCALP;
+               outSig.direction = STRAT_DIR_SELL;
+               outSig.details   = StringFormat(
+                  "SETUP B SELL | adx5M=%.1f price=%.5f boxHigh=%.5f stochK=%.1f",
+                  adx5M, midPrice, boxHigh, stochK);
+               return true;
+            }
          }
+      }
 
-         double tolerance = boxRange * p.boxTouchTolerancePct;
-
-         // BUY: price touching / near the BOTTOM of the box
-         if(midPrice <= boxLow + tolerance &&
-            StochCrossedUpFromOversold(stochK, stochKPrev, stochD, stochDPrev,
-                                       p.stochOversold))
+      // ── SETUP C: "HFT Range Scalp" ───────────────────────────────────────
+      // Context : Price ranging inside the 5M box; open price confirmed inside box.
+      // Trigger : Price touches box edge + Stochastic K at extreme level
+      //           (no K/D cross needed – speed matters for HFT).
+      //           ADX gate is optional (InpSetupCRequireADX) – off by default so
+      //           ADX at 22-25 does not block valid wall-bounce entries.
+      // Hierarchy: Only evaluated when neither Setup A nor Setup B fired.
+      if(p.setupCEnabled)
+      {
+         bool adxOkForC = (!p.setupCRequireADX || adx5M < p.adxRangingThreshold);
+         if(adxOkForC)
          {
-            outSig.setupType = SETUP_RANGE_SCALP;
-            outSig.direction = STRAT_DIR_BUY;
-            outSig.details   = StringFormat(
-               "SETUP B BUY | adx5M=%.1f price=%.5f boxLow=%.5f stochK=%.1f",
-               adx5M, midPrice, boxLow, stochK);
-            return true;
-         }
+            MqlTick tick;
+            if(!SymbolInfoTick(symbol, tick)) return false;
+            double midPrice = (tick.ask + tick.bid) * 0.5;
 
-         // SELL: price touching / near the TOP of the box
-         if(midPrice >= boxHigh - tolerance &&
-            StochCrossedDownFromOverbought(stochK, stochKPrev, stochD, stochDPrev,
-                                           p.stochOverbought))
-         {
-            outSig.setupType = SETUP_RANGE_SCALP;
-            outSig.direction = STRAT_DIR_SELL;
-            outSig.details   = StringFormat(
-               "SETUP B SELL | adx5M=%.1f price=%.5f boxHigh=%.5f stochK=%.1f",
-               adx5M, midPrice, boxHigh, stochK);
-            return true;
+            double boxRange = boxHigh - boxLow;
+
+            // Box size guard: avoids entering tiny ranges where spread eats the move
+            if(boxRange >= p.setupCMinBoxSize && boxRange > 0.0)
+            {
+               // Price must be inside the box at this bar\'s open
+               if(midPrice > boxLow && midPrice < boxHigh)
+               {
+                  double tolerance = boxRange * p.boxTouchTolerancePct;
+
+                  // BUY: price at box low + Stoch K in oversold zone (no cross required)
+                  if(midPrice <= boxLow + tolerance && stochK <= p.stochOversold)
+                  {
+                     outSig.setupType = SETUP_HFT_RANGE_SCALP;
+                     outSig.direction = STRAT_DIR_BUY;
+                     outSig.details   = StringFormat(
+                        "SETUP C BUY | adx5M=%.1f price=%.5f boxLow=%.5f stochK=%.1f(extreme)",
+                        adx5M, midPrice, boxLow, stochK);
+                     return true;
+                  }
+
+                  // SELL: price at box high + Stoch K in overbought zone (no cross required)
+                  if(midPrice >= boxHigh - tolerance && stochK >= p.stochOverbought)
+                  {
+                     outSig.setupType = SETUP_HFT_RANGE_SCALP;
+                     outSig.direction = STRAT_DIR_SELL;
+                     outSig.details   = StringFormat(
+                        "SETUP C SELL | adx5M=%.1f price=%.5f boxHigh=%.5f stochK=%.1f(extreme)",
+                        adx5M, midPrice, boxHigh, stochK);
+                     return true;
+                  }
+               }
+            }
          }
       }
 
