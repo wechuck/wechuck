@@ -1,87 +1,31 @@
 #property strict
-#property version   "2.32"
+#property version   "3.00"
 #property description "WeChuck EA – Multi-Timeframe Exhaustion & Range Scalp Strategy"
 // Changelog:
-//   v2.32 – Fixed same-second open/close on Setup C: max-profit cap (InpSetupCMaxProfitDollar)
-//           is now placed AFTER the min-hold gate instead of before it.  Previously the cap
-//           bypassed InpMinHoldSeconds and closed GOLD trades within the same second because a
-//           $5 price move on 0.03 lots was enough to reach the $15 cap instantly.  Moving it
-//           after min-hold gives the trailing stop logic time to activate first.
-//   v2.31 – Setup C entry now requires RSI confirmation in addition to Stochastic K
-//           extreme: BUY needs rsiPrev < rsiOversold AND rsiCur > rsiPrev; SELL needs
-//           rsiPrev > rsiOverbought AND rsiCur < rsiPrev.  Stochastic/ADX-based dynamic
-//           exit is disabled for Setup C trades – they only close by TP, SL, time exit,
-//           or max-profit cap.  Trailing SL (RRMin trigger) already applied to all setups.
-//   v2.30 – Per-setup enable/disable switches (InpEnableSetupA/B/C) for isolated
-//           backtesting. Improvement recommendations block added below.
-//   v2.20 – Setup C "HFT Range Scalp" added. Two-layer slippage protection (pre-entry
-//           + post-fill) for Setup B and C. $15 max-profit guard for Setup C.
-//           Stochastic-extreme gate moved inside A/B only; Setup C uses K-at-extreme.
-//           ADX gate for Setup C is optional (off by default). OnePipPrice() helper.
-//   v2.00 – Full strategy rework. Replaced generic score-based system with the
-//           two master setups: Setup A "Rubber Band" (high-ADX exhaustion reversal)
-//           and Setup B "Range Scalp" (low-ADX box bounce). Signal logic delegated
-//           to StrategyCore.mqh. Zone gating via ZoneDetector.mqh. Stochastic
-//           parameters aligned to strategy spec (14,1,3). RSI added as
-//           confirmation for Setup A. Setup B TP targets opposite box wall.
+//   v3.00 – Full Layer 1-5 strategy upgrade (PhD/Expert-grade win-rate plan 2026):
+//           • Per-setup session windows (A: 07-17, B: 07-16, C: 07:15-15 UTC)
+//           • News Event Hard Block (hardcoded FOMC/NFP/CPI/BOE/ECB + recurring windows)
+//           • Box Age Minimum + Max Touches filter (B/C)
+//           • Wick Sweep Confirmation "Stop Hunt Trap" entry (B/C; SL on sweep wick)
+//           • Dual M1+M5 Stochastic gate
+//           • Rejection Candle (pin bar) gate (A/C)
+//           • ATR Compression / Expansion filter (M5)
+//           • H4 EMA Trend Alignment for Setup A
+//           • Fibonacci Confluence gate (B/C, optional)
+//           • Round-number magnet avoidance
+//           • Tick-volume minimum + Liquidity-void filter
+//           • Box Invalidation Close (B/C: close immediately when 5M closes outside box)
+//           • Breakeven Stop trigger (% of box range)
+//           • 3-Target Partial Close system (T1/T2/T3)
+//           • Adaptive Entry Strictness based on rolling win rate
+//           • Drawdown-Adaptive Lot Sizing (session-peak based)
+//           • Daily session reset (rolling buffer + peak equity + DD scale)
+//   v2.32 – Fixed same-second open/close on Setup C: max-profit cap placed AFTER min-hold.
+//   v2.31 – Setup C entry now requires RSI confirmation. Dynamic exit disabled for Setup C.
+//   v2.30 – Per-setup enable/disable switches.
+//   v2.20 – Setup C "HFT Range Scalp" added.
+//   v2.00 – Full strategy rework: Setup A (Rubber Band) + Setup B (Range Scalp).
 //   v1.00 – Initial release.
-//
-// ──────────────────────────────────────────────────────────────────────────────
-// IMPROVEMENT RECOMMENDATIONS (not yet implemented – future work)
-// ──────────────────────────────────────────────────────────────────────────────
-//
-// 1. SESSION FILTER PER SETUP
-//    - Setup A (exhaustion reversal) works best during London/NY overlap where
-//      volume causes real ADX spikes. Filter it to 07:00-17:00 UTC only.
-//    - Setup C (HFT scalp) should be further restricted to avoid the first 15
-//      minutes of London open when boxes break more than they bounce.
-//    - Recommended inputs: InpSetupA_SessionStartHour, InpSetupA_SessionEndHour
-//      (and equivalent for C). Already have InpLowLiqStartHour/EndHour but it is
-//      global – per-setup session filtering would be more precise.
-//
-// 2. BREAKEVEN STOP (SETUP C)
-//    - Once Setup C profit exceeds 50% of the box range, move SL to breakeven.
-//      Prevents a winner turning into a loser on a sudden box break.
-//    - Recommended input: InpSetupC_BreakevenAtPct (default 50)
-//
-// 3. MULTI-TIMEFRAME BOX CONFIRMATION
-//    - Before entering Setup B or C, confirm the 5M box is also visible on 15M
-//      (i.e. price has been consolidating for at least 3 x 15M bars).
-//      This avoids entering boxes that are too fresh and likely to break.
-//    - Would require adding a 15M bar-consolidation check in StrategyCore.
-//
-// 4. VOLUME / TICK-DENSITY FILTER
-//    - On Setup C, if the tick count during the last 1M bar is below a threshold
-//      the "touch" may be a ghost spike with no real buyers/sellers at the wall.
-//    - Recommended input: InpSetupC_MinTicksPerBar (default 30)
-//    - Requires OnChartEvent tick counting or an auxiliary tick counter.
-//
-// 5. ATR-BASED DYNAMIC SL FOR SETUP A
-//    - Current SL uses the wick of the signal bar, which can be very tight on
-//      low-volatility symbols. Replace or blend with a 1M ATR(14) × multiplier
-//      so the SL breathes with volatility rather than being fixed to one candle.
-//    - Recommended inputs: InpSetupA_SLMode (WICK / ATR / MAX_OF_BOTH),
-//      InpSetupA_AtrMultiplier (default 1.5)
-//
-// 6. DRAWDOWN-ADAPTIVE LOT SIZING
-//    - Current dynamic lot already scales by equity. Add a second layer: if the
-//      account has lost more than X% from its peak (intra-session drawdown), cut
-//      lot size to 50% automatically until a win recovers it.
-//    - Recommended inputs: InpDDScalePct (default 5), InpDDLotFactor (default 0.5)
-//
-// 7. CORRELATION / SAME-DIRECTION GUARD
-//    - When running the EA on multiple pairs simultaneously (e.g. EURUSD + GBPAUD),
-//      prevent opening two positions in the same direction at the same time.
-//      Reduces hidden correlated drawdown.
-//    - Would need a cross-symbol position scan in CanTradeNow() inside RiskManager.
-//
-// 8. BOX INVALIDATION ON BREAK
-//    - If a new 5M candle closes outside the box while a Setup B/C position is open,
-//      the structural premise is broken. Close immediately instead of waiting for TP/SL.
-//    - Recommended input: InpCloseOnBoxBreak (default true)
-//    - Would be checked inside ManageOpenPosition().
-//
-// ──────────────────────────────────────────────────────────────────────────────
 
 #include "include/Types.mqh"
 #include "include/DiagnosticsLogger.mqh"
@@ -89,6 +33,8 @@
 #include "include/EntryScoring.mqh"
 #include "include/RiskManager.mqh"
 #include "include/ExecutionManager.mqh"
+#include "include/NewsFilter.mqh"
+#include "include/PartialCloseManager.mqh"
 
 //──────────────────────────────────────────────────────────────────────────────
 // Inputs
@@ -105,46 +51,92 @@ input int    InpLowLiqStartHour      = 22;
 input int    InpLowLiqEndHour        = 1;
 input double InpMinBodyRangeRatio    = 0.30;
 
+input group "Per-Setup Session Windows (UTC)"
+input int    InpSetupA_StartHour  = 7;   // Setup A trading start hour (default 07:00 UTC)
+input int    InpSetupA_EndHour    = 17;  // Setup A trading end hour   (default 17:00 UTC)
+input int    InpSetupB_StartHour  = 7;   // Setup B trading start hour (default 07:00 UTC)
+input int    InpSetupB_EndHour    = 16;  // Setup B trading end hour   (default 16:00 UTC)
+input int    InpSetupC_StartHour  = 7;   // Setup C trading start hour (default 07:00 UTC)
+input int    InpSetupC_EndHour    = 15;  // Setup C trading end hour   (default 15:00 UTC)
+input int    InpSetupC_SkipLondonOpenMinutes = 15; // Skip first N minutes of London open (07:00+N)
+
+input group "News Event Hard Block"
+input bool   InpEnableNewsFilter  = true;  // Block entries around high-impact news events
+input int    InpNewsWindowMinutes = 30;    // ± window in minutes around each event
+
 input group "Bias Filter (M15) – optional alignment check"
 input int    InpEmaFast              = 50;
 input int    InpEmaSlow              = 200;
 input int    InpStructureLookback    = 10;
-input bool   InpRequireM15Alignment  = false;  // When true, M15 bias must match signal direction
+input bool   InpRequireM15Alignment  = false;
 
 input group "ADX – Environment Filter (14-period)"
 input int    InpAdxPeriod            = 14;
-// Setup A – Rubber Band
-input double InpAdxExhaustionLevel   = 40.0;   // 1M ADX must exceed this to qualify Setup A
-// Invalidation gate – expanding momentum (do not fade a breakout)
-input double InpAdxExpandingMin      = 25.0;   // ADX expanding zone lower bound
-input double InpAdxExpandingMax      = 35.0;   // ADX expanding zone upper bound
-// Setup B – Range Scalp
-input double InpAdxRangingThreshold  = 20.0;   // 5M ADX must be below this for Setup B
-// Dynamic exit
-input double InpAdxExitWeakThreshold = 18.0;   // Close trade when 1M ADX drops below this
+input double InpAdxExhaustionLevel   = 40.0;
+input double InpAdxExpandingMin      = 25.0;
+input double InpAdxExpandingMax      = 35.0;
+input double InpAdxRangingThreshold  = 20.0;
+input double InpAdxExitWeakThreshold = 18.0;
 
 input group "RSI – Pressure Gauge (14-period)"
 input int    InpRsiPeriod            = 14;
-input double InpRsiOversold          = 30.0;   // Setup A/C BUY: RSI must be below this
-input double InpRsiOverbought        = 70.0;   // Setup A/C SELL: RSI must be above this
+input double InpRsiOversold          = 30.0;
+input double InpRsiOverbought        = 70.0;
 
 input group "Stochastic (14,1,3) – The Trigger"
 input int    InpStochK               = 14;
 input int    InpStochD               = 3;
 input int    InpStochSlowing         = 1;
-input double InpStochOversold        = 20.0;   // Oversold extreme for BUY trigger
-input double InpStochOverbought      = 80.0;   // Overbought extreme for SELL trigger
+input double InpStochOversold        = 20.0;
+input double InpStochOverbought      = 80.0;
 
 input group "5M Range Box (Setup B)"
-input int    InpM5RangeLookback      = 50;     // Closed 5M bars used to build the structural box
-input double InpBoxTolerancePct      = 15.0;   // % of box size that counts as "near the edge"
+input int    InpM5RangeLookback      = 50;
+input double InpBoxTolerancePct      = 15.0;
 
 input group "Zone Detector – No Zone, No Trade"
-input bool   InpRequireZone          = true;   // Enforce H1/M15 zone check for Setup A
-input int    InpZoneLookback         = 200;    // Bars of history to scan for zones
-input int    InpZoneWingBars         = 3;      // Bars on each side required to confirm swing
-input int    InpZoneMinTouches       = 2;      // Minimum zone touches for structural validity
-input double InpZoneTolerancePct     = 0.05;  // Zone band width as % of price
+input bool   InpRequireZone          = true;
+input int    InpZoneLookback         = 200;
+input int    InpZoneWingBars         = 3;
+input int    InpZoneMinTouches       = 2;
+input double InpZoneTolerancePct     = 0.05;
+
+input group "Box Quality Filters (Setup B/C)"
+input int    InpMinBoxAgeMinutes     = 45;   // Minimum box age in minutes (0 = off)
+input int    InpMinBoxTouches        = 3;    // Minimum wall touches required (0 = off)
+input int    InpMaxBoxTouches        = 6;    // Maximum wall touches – wall weakening (0 = off)
+
+input group "Wick Sweep Confirmation – Stop Hunt Trap (Setup B/C)"
+input bool   InpRequireWickSweep        = true;  // Require pierce-and-close-back beyond box wall
+input double InpSweepBufferPipsForex    = 5.0;   // Max sweep depth in pips (Forex)
+input double InpSweepBufferPipsGold     = 50.0;  // Max sweep depth in pips (Gold/XAUUSD)
+
+input group "Dual Timeframe Stochastic Gate"
+input bool   InpRequireM5StochConfirm  = true;  // M5 Stoch K must also be at extreme
+
+input group "Rejection Candle Gate (Setup A/C)"
+input bool   InpRequireRejectionCandle = false;  // Require pin bar / hammer on signal bar
+input double InpMinWickBodyRatio       = 2.0;    // Min (wick / body) ratio
+
+input group "ATR Expansion Filter (M5)"
+input bool   InpRequireATRExpansion    = false;  // M5 ATR must be rising vs prior bar
+input int    InpATRPeriod              = 14;     // ATR period
+
+input group "H4 EMA Trend Alignment (Setup A)"
+input bool   InpRequireH4TrendAlign    = true;   // Only take Setup A in H4 EMA trend direction
+input int    InpH4EmaFast              = 50;     // H4 fast EMA period
+input int    InpH4EmaSlow              = 200;    // H4 slow EMA period
+
+input group "Fibonacci Confluence Gate (Setup B/C, optional)"
+input bool   InpRequireFibConfluence   = false;  // Box wall must coincide with H1 Fib level
+input double InpFibTolerancePct        = 0.10;   // Fib band tolerance as % of price
+
+input group "Expert-Grade Entry Filters"
+input bool   InpAvoidRoundNumbers      = true;   // Skip entries near round-number magnets
+input double InpRoundNumRadiusPipsForex = 3.0;   // Round-number avoidance radius (Forex pips)
+input double InpRoundNumRadiusPipsGold  = 30.0;  // Round-number avoidance radius (Gold pips)
+input int    InpMinTickVolume           = 0;      // Min tick volume on signal bar (0 = off)
+input bool   InpLiquidityVoidFilter     = false;  // Block if bar range > 3× M1 ATR
 
 input group "Risk Guards"
 input int    InpMinSecondsBetweenEntries    = 10;
@@ -164,34 +156,57 @@ input double InpRiskPctFloor     = 0.3;
 input double InpEquityScaleStart = 300.0;
 input double InpEquityScaleFull  = 5000.0;
 
+input group "Drawdown-Adaptive Lot Sizing"
+input bool   InpDDAdaptiveLots   = true;   // Halve lot size after session drawdown > InpDDScalePct
+input double InpDDScalePct       = 5.0;    // Drawdown % from session peak that triggers halving
+input double InpDDLotFactor      = 0.5;    // Lot multiplier when scaling is active
+
+input group "Adaptive Entry Strictness (Rolling Win Rate)"
+input bool   InpAdaptiveMode          = true;   // Raise all confirmation thresholds after a bad streak
+input int    InpRollingWindowTrades   = 20;     // Number of recent trades to monitor
+input double InpAdaptiveLowWinRate    = 55.0;   // Below this → force all optional gates ON
+
 input group "Stops and Targets"
-input double InpSlBufferPips         = 2.0;   // Extra pips beyond wick/box edge when placing SL
-input double InpFallbackSlPips       = 8.0;   // Minimum SL pips (forex) / fallback when bar data missing
-input int    InpGoldSlPoints         = 150;   // Minimum SL points for gold / fallback
-input double InpRRMin                = 4.7;   // R:R multiple at which trailing stop activates (conservative TP)
-input double InpRRMax                = 10.0;  // R:R multiple for hard TP on Setup A
-input int    InpTimeExitBars         = 15;    // Force close after N 1M bars
-input int    InpMinHoldSeconds       = 60;    // Suppress all soft exits for N seconds after entry
-input double InpTrailingDistancePips = 3.0;   // Trail step size (pips) once RRMin profit is reached
+input double InpSlBufferPips         = 2.0;
+input double InpFallbackSlPips       = 8.0;
+input double InpGoldSlPoints         = 150;
+input double InpRRMin                = 4.7;
+input double InpRRMax                = 10.0;
+input int    InpTimeExitBars         = 15;
+input int    InpMinHoldSeconds       = 60;
+input double InpTrailingDistancePips = 3.0;
+
+input group "Partial Close System"
+input bool   InpUsePartialClose  = true;   // Enable 3-target partial close
+input double InpT1RR             = 1.0;    // R:R to trigger T1 close
+input double InpT2RR             = 2.0;    // R:R to trigger T2 close
+input double InpT1ClosePct       = 33.0;   // % of position closed at T1
+input double InpT2ClosePct       = 33.0;   // % of position closed at T2
+
+input group "Breakeven Stop"
+input bool   InpUseBreakeven     = true;   // Move SL to BE after profit reaches threshold
+input double InpBreakevenAtPct   = 50.0;   // % of box range at which BE triggers (B/C)
+
+input group "Box Invalidation"
+input bool   InpCloseOnBoxBreak  = true;   // Close B/C trade if 5M candle closes outside box
 
 input group "Execution"
 input int  InpMaxDeviationPoints = 10;
 input int  InpOrderRetries       = 3;
-input bool InpAutoAttachSignal   = true;  // Attach WeChuckSignal indicator to the visual chart on init
+input bool InpAutoAttachSignal   = true;
 
-input group "Setup Enable / Disable – toggle individual setups for isolated testing"
-input bool   InpEnableSetupA          = true;   // Setup A ON/OFF (Rubber Band – high-ADX exhaustion reversal)
-input bool   InpEnableSetupB          = true;   // Setup B ON/OFF (Range Scalp – low-ADX box bounce with Stoch cross)
-// NOTE: disable A+B and enable C alone to backtest Setup C in isolation, or any combination
+input group "Setup Enable / Disable"
+input bool   InpEnableSetupA          = true;
+input bool   InpEnableSetupB          = true;
 
 input group "Setup C – HFT Range Scalp"
-input bool   InpEnableSetupC          = true;   // Master switch for Setup C
-input bool   InpSetupCRequireADX      = false;  // Require 5M ADX < threshold (off = Stoch alone gates entry)
-input double InpSetupCMinBoxSizePips  = 30.0;   // Minimum box size in pips – below this skip C (spread guard)
-input double InpSetupCSLBufferPips    = 1.5;    // SL buffer beyond box edge for Setup C
-input double InpSetupCMaxProfitDollar = 15.0;   // Close Setup C when floating profit reaches this dollar amount
-input double InpSetupCMaxSlippagePips     = 2.0;   // Slippage protection: max pips from box edge at fill (Forex)
-input double InpSetupCMaxSlippagePipsGold = 50.0;  // Slippage protection: max pips from box edge at fill (Gold/XAUUSD)
+input bool   InpEnableSetupC          = true;
+input bool   InpSetupCRequireADX      = false;
+input double InpSetupCMinBoxSizePips  = 30.0;
+input double InpSetupCSLBufferPips    = 1.5;
+input double InpSetupCMaxProfitDollar = 15.0;
+input double InpSetupCMaxSlippagePips     = 2.0;
+input double InpSetupCMaxSlippagePipsGold = 50.0;
 
 //──────────────────────────────────────────────────────────────────────────────
 // Globals
@@ -201,11 +216,22 @@ CMarketStructureFilter g_bias;
 CEntryScoring          g_scoring;
 CRiskManager           g_risk;
 CExecutionManager      g_exec;
+CNewsFilter            g_news;
+CPartialCloseManager   g_partial;
 
 datetime  g_lastM1BarTime      = 0;
 datetime  g_lastEntrySignalBar = 0;
 bool      g_orderInFlight      = false;
 SetupType g_openPositionSetup  = SETUP_NONE;  // tracks which setup opened the current position
+
+// Entry box levels – stored when a position is opened for box-invalidation / BE checks
+double    g_entryBoxHigh       = 0.0;
+double    g_entryBoxLow        = 0.0;
+bool      g_breakevenApplied   = false;
+
+// Position state for win/loss outcome detection
+bool      g_prevPositionOpen   = false;
+double    g_prevPositionProfit = 0.0;
 
 //──────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -226,7 +252,6 @@ bool IsGold(const string symbol)
 }
 
 // Returns the price distance of one pip for the given symbol.
-// Forex 5/3-digit: 1 pip = 10 points.  Everything else: 1 pip = 1 point.
 double OnePipPrice(const string symbol)
 {
    int    digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
@@ -250,6 +275,37 @@ bool InLowLiquidityWindow(const datetime t)
    if(InpLowLiqStartHour < InpLowLiqEndHour)
       return (dt.hour >= InpLowLiqStartHour && dt.hour < InpLowLiqEndHour);
    return (dt.hour >= InpLowLiqStartHour || dt.hour < InpLowLiqEndHour);
+}
+
+//──────────────────────────────────────────────────────────────────────────────
+// IsInSetupSessionWindow
+// Returns true when the current UTC time is within the allowed trading window
+// for the given setup.
+// Setup C avoids the first InpSetupC_SkipLondonOpenMinutes of London open.
+//──────────────────────────────────────────────────────────────────────────────
+bool IsInSetupSessionWindow(const SetupType setup, const datetime now)
+{
+   MqlDateTime dt;
+   TimeToStruct(now, dt);
+   int hour = dt.hour;
+   int min  = dt.min;
+
+   if(setup == SETUP_RUBBER_BAND)
+   {
+      return (hour >= InpSetupA_StartHour && hour < InpSetupA_EndHour);
+   }
+   if(setup == SETUP_RANGE_SCALP)
+   {
+      return (hour >= InpSetupB_StartHour && hour < InpSetupB_EndHour);
+   }
+   if(setup == SETUP_HFT_RANGE_SCALP)
+   {
+      if(hour < InpSetupC_StartHour || hour >= InpSetupC_EndHour) return false;
+      // Skip the first N minutes of London open (avoid box-break period)
+      if(hour == InpSetupC_StartHour && min < InpSetupC_SkipLondonOpenMinutes) return false;
+      return true;
+   }
+   return true;
 }
 
 bool CandleBodyIsHealthy(const string symbol)
@@ -332,11 +388,18 @@ double ComputeLotSize(const string symbol, const int slPoints)
    double safeMin = (minVolume > 0.0 ? minVolume : 0.01);
    double safeMax = (maxVolume > 0.0 ? maxVolume : 100.0);
    lot = MathMax(safeMin, MathMin(lot, safeMax));
+   // Apply drawdown-adaptive lot factor
+   if(InpDDAdaptiveLots)
+   {
+      double ddFactor = g_risk.GetLotFactor(equity, InpDDScalePct, InpDDLotFactor);
+      lot = MathMax(safeMin, MathFloor((lot * ddFactor) / stepVolume) * stepVolume);
+   }
    return NormalizeDouble(lot, 2);
 }
 
 //──────────────────────────────────────────────────────────────────────────────
 // ManageOpenPosition – trailing stop + time-based exit + dynamic exit
+//  + partial close + breakeven + box invalidation close
 //──────────────────────────────────────────────────────────────────────────────
 void ManageOpenPosition(const string symbol)
 {
@@ -347,13 +410,117 @@ void ManageOpenPosition(const string symbol)
 
    datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
 
-   // Minimum hold time – suppress all soft exits until elapsed (broker SL always active)
+   // Minimum hold time – suppress all soft exits until elapsed
    if(InpMinHoldSeconds > 0 && TimeCurrent() - openTime < (datetime)InpMinHoldSeconds)
       return;
 
-   // ── Setup C max-profit guard – close once floating P&L reaches the dollar cap ─
-   // Placed AFTER the min-hold gate so it cannot fire on the same second as entry,
-   // giving the trailing stop logic a fair chance to activate first.
+   // ── Partial close (T1 / T2) ──────────────────────────────────────────────
+   g_partial.Manage(symbol,
+                    InpT1RR, InpT2RR, InpT1ClosePct, InpT2ClosePct,
+                    InpUsePartialClose);
+
+   // Re-check position still exists after partial close
+   if(!PositionSelect(symbol)) return;
+
+   // ── Breakeven stop (box-range percentage trigger) ─────────────────────────
+   // Fires when price has moved InpBreakevenAtPct% of the entry box range in profit.
+   // Only for box-setups (B/C) where the box range is meaningful.
+   if(InpUseBreakeven && !g_breakevenApplied &&
+      (g_openPositionSetup == SETUP_RANGE_SCALP ||
+       g_openPositionSetup == SETUP_HFT_RANGE_SCALP) &&
+      g_entryBoxHigh > g_entryBoxLow)
+   {
+      double openPrice   = PositionGetDouble(POSITION_PRICE_OPEN);
+      double boxRange    = g_entryBoxHigh - g_entryBoxLow;
+      double beThreshold = boxRange * (InpBreakevenAtPct / 100.0);
+
+      MqlTick tick;
+      if(SymbolInfoTick(symbol, tick))
+      {
+         double profitMove = (dir == STRAT_DIR_BUY)
+                             ? tick.bid - openPrice
+                             : openPrice - tick.ask;
+
+         if(profitMove >= beThreshold)
+         {
+            double currentSL = PositionGetDouble(POSITION_SL);
+            double currentTP = PositionGetDouble(POSITION_TP);
+            double point     = SymbolInfoDouble(symbol, SYMBOL_POINT);
+            double onePip    = OnePipPrice(symbol);
+            double newSL     = (dir == STRAT_DIR_BUY)
+                               ? openPrice + onePip
+                               : openPrice - onePip;
+
+            bool beNeeded = (dir == STRAT_DIR_BUY)
+                            ? (newSL > currentSL)
+                            : (currentSL == 0.0 || newSL < currentSL);
+
+            if(beNeeded && g_exec.ModifyPosition(symbol, newSL, currentTP))
+            {
+               g_breakevenApplied = true;
+               g_logger.LogDecision(symbol, false,
+                  StringFormat("Breakeven applied | profit=%.5f threshold=%.5f newSL=%.5f",
+                               profitMove, beThreshold, newSL));
+            }
+         }
+      }
+   }
+
+   // Re-check position still exists
+   if(!PositionSelect(symbol)) return;
+
+   // ── News window: tighten SL to breakeven for open positions ──────────────
+   if(InpEnableNewsFilter && !g_breakevenApplied && g_news.IsNewsWindow(TimeCurrent()))
+   {
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double currentSL = PositionGetDouble(POSITION_SL);
+      double currentTP = PositionGetDouble(POSITION_TP);
+      double onePip    = OnePipPrice(symbol);
+      double newSL     = (dir == STRAT_DIR_BUY) ? openPrice + onePip : openPrice - onePip;
+      bool   beNeeded  = (dir == STRAT_DIR_BUY)
+                         ? (newSL > currentSL)
+                         : (currentSL == 0.0 || newSL < currentSL);
+      if(beNeeded)
+      {
+         g_exec.ModifyPosition(symbol, newSL, currentTP);
+         g_breakevenApplied = true;
+         g_logger.LogDecision(symbol, false, "News window: SL moved to breakeven");
+      }
+   }
+
+   // Re-check position still exists
+   if(!PositionSelect(symbol)) return;
+
+   // ── Box invalidation close (Setup B/C only) ───────────────────────────────
+   // If a 5M candle closes outside the box, the structural premise is broken.
+   if(InpCloseOnBoxBreak &&
+      (g_openPositionSetup == SETUP_RANGE_SCALP ||
+       g_openPositionSetup == SETUP_HFT_RANGE_SCALP) &&
+      g_entryBoxHigh > g_entryBoxLow)
+   {
+      MqlRates m5bar[1];
+      ArraySetAsSeries(m5bar, true);
+      if(CopyRates(symbol, PERIOD_M5, 1, 1, m5bar) == 1)
+      {
+         bool invalidated = false;
+         if(dir == STRAT_DIR_BUY  && m5bar[0].close < g_entryBoxLow)  invalidated = true;
+         if(dir == STRAT_DIR_SELL && m5bar[0].close > g_entryBoxHigh) invalidated = true;
+
+         if(invalidated)
+         {
+            g_logger.LogDecision(symbol, false,
+               StringFormat("Box invalidation close | 5M close=%.5f box=[%.5f,%.5f]",
+                            m5bar[0].close, g_entryBoxLow, g_entryBoxHigh));
+            g_exec.CloseSymbolPosition(symbol, g_logger);
+            return;
+         }
+      }
+   }
+
+   // Re-check position still exists
+   if(!PositionSelect(symbol)) return;
+
+   // ── Setup C max-profit guard ──────────────────────────────────────────────
    if(g_openPositionSetup == SETUP_HFT_RANGE_SCALP && InpEnableSetupC &&
       InpSetupCMaxProfitDollar > 0.0)
    {
@@ -368,8 +535,9 @@ void ManageOpenPosition(const string symbol)
       }
    }
 
-   // Time-based exit
-   int      barsSinceOpen = iBarShift(symbol, PERIOD_M1, openTime, true);
+   // ── Time-based exit ───────────────────────────────────────────────────────
+   if(!PositionSelect(symbol)) return;
+   int barsSinceOpen = iBarShift(symbol, PERIOD_M1, openTime, true);
    if(barsSinceOpen >= InpTimeExitBars && InpTimeExitBars > 0)
    {
       g_logger.LogDecision(symbol, false, "Time-based exit");
@@ -377,29 +545,46 @@ void ManageOpenPosition(const string symbol)
       return;
    }
 
-   // Dynamic exit (only when in profit – protect winners)
-   // Skipped for Setup C – those trades close only by TP, SL, time exit,
-   // or max-profit cap; the Stochastic/ADX-based exit is intentionally disabled.
+   // ── Dynamic exit (only when in profit – protect winners) ─────────────────
+   // Skipped for Setup C – those trades close only by TP, SL, time exit, or max-profit cap.
+   if(!PositionSelect(symbol)) return;
    double posProfit = PositionGetDouble(POSITION_PROFIT);
-   if(g_openPositionSetup != SETUP_HFT_RANGE_SCALP &&
-      posProfit > 0.0 &&
-      g_scoring.ShouldExitByDynamics(symbol, dir,
-                                     InpAdxPeriod, InpAdxExitWeakThreshold,
-                                     InpStochK, InpStochD, InpStochSlowing,
-                                     InpStochOversold, InpStochOverbought))
+   if(g_openPositionSetup != SETUP_HFT_RANGE_SCALP && posProfit > 0.0)
    {
-      g_logger.LogDecision(symbol, false, "Dynamic exit condition");
-      g_exec.CloseSymbolPosition(symbol, g_logger);
-      return;
+      StrategyParams exitP;
+      exitP.adxPeriod            = InpAdxPeriod;
+      exitP.adxExhaustionLevel   = InpAdxExhaustionLevel;
+      exitP.adxExpandingMin      = InpAdxExpandingMin;
+      exitP.adxExpandingMax      = InpAdxExpandingMax;
+      exitP.adxRangingThreshold  = InpAdxRangingThreshold;
+      exitP.adxExitWeakThreshold = InpAdxExitWeakThreshold;
+      exitP.rsiPeriod            = InpRsiPeriod;
+      exitP.rsiOversold          = InpRsiOversold;
+      exitP.rsiOverbought        = InpRsiOverbought;
+      exitP.stochKPeriod         = InpStochK;
+      exitP.stochDPeriod         = InpStochD;
+      exitP.stochSlowing         = InpStochSlowing;
+      exitP.stochOversold        = InpStochOversold;
+      exitP.stochOverbought      = InpStochOverbought;
+      exitP.m5RangeLookback      = InpM5RangeLookback;
+      exitP.boxTouchTolerancePct = InpBoxTolerancePct / 100.0;
+
+      if(g_scoring.ShouldExitByDynamics(symbol, dir, exitP))
+      {
+         g_logger.LogDecision(symbol, false, "Dynamic exit condition");
+         g_exec.CloseSymbolPosition(symbol, g_logger);
+         return;
+      }
    }
 
-   // R:R-aware trailing stop – activates once profit reaches InpRRMin × entry SL distance
+   // ── R:R-aware trailing stop ───────────────────────────────────────────────
+   if(!PositionSelect(symbol)) return;
    double openPrice    = PositionGetDouble(POSITION_PRICE_OPEN);
    double entrySL      = PositionGetDouble(POSITION_SL);
    double currentSL    = entrySL;
    double currentTP    = PositionGetDouble(POSITION_TP);
    double slDist       = MathAbs(openPrice - entrySL);
-   double trailTrigger = slDist * InpRRMin;   // e.g. 4.7× SL distance
+   double trailTrigger = slDist * InpRRMin;
 
    double point        = SymbolInfoDouble(symbol, SYMBOL_POINT);
    double trailingDist = (IsGold(symbol) ? InpTrailingDistancePips * 10.0
@@ -455,40 +640,83 @@ void TryEntry(const string symbol)
       return;
    }
 
-   // ── Strategy signal evaluation ────────────────────────────────────────────
-   // Evaluated first so Setup C (Stoch+RSI filtered, box-unrestricted) can bypass the
-   // pre-conditions below that apply only to Setups A and B.
-   double setupCMinBoxSize = InpSetupCMinBoxSizePips * OnePipPrice(symbol);
+   // ── News filter ──────────────────────────────────────────────────────────
+   if(InpEnableNewsFilter && g_news.IsNewsWindow(TimeCurrent()))
+   {
+      g_logger.LogDecision(symbol, false, "News event hard block – no new entries");
+      return;
+   }
 
+   // ── Build StrategyParams with all gate fields ─────────────────────────────
+   double setupCMinBoxSize       = InpSetupCMinBoxSizePips * OnePipPrice(symbol);
+   double sweepBufPrice          = (IsGold(symbol) ? InpSweepBufferPipsGold
+                                                   : InpSweepBufferPipsForex) * OnePipPrice(symbol);
+   double roundNumRadiusPrice    = (IsGold(symbol) ? InpRoundNumRadiusPipsGold
+                                                   : InpRoundNumRadiusPipsForex) * OnePipPrice(symbol);
+
+   // Determine if adaptive mode is forcing stricter gates
+   double rollingWR = g_risk.RollingWinRatePct();
+   bool   lowWR     = (InpAdaptiveMode && rollingWR < InpAdaptiveLowWinRate);
+
+   StrategyParams p;
+   p.adxPeriod              = InpAdxPeriod;
+   p.adxExhaustionLevel     = InpAdxExhaustionLevel;
+   p.adxExpandingMin        = InpAdxExpandingMin;
+   p.adxExpandingMax        = InpAdxExpandingMax;
+   p.adxRangingThreshold    = InpAdxRangingThreshold;
+   p.adxExitWeakThreshold   = InpAdxExitWeakThreshold;
+   p.rsiPeriod              = InpRsiPeriod;
+   p.rsiOversold            = InpRsiOversold;
+   p.rsiOverbought          = InpRsiOverbought;
+   p.stochKPeriod           = InpStochK;
+   p.stochDPeriod           = InpStochD;
+   p.stochSlowing           = InpStochSlowing;
+   p.stochOversold          = InpStochOversold;
+   p.stochOverbought        = InpStochOverbought;
+   p.m5RangeLookback        = InpM5RangeLookback;
+   p.boxTouchTolerancePct   = InpBoxTolerancePct / 100.0;
+   p.setupAEnabled          = InpEnableSetupA;
+   p.setupBEnabled          = InpEnableSetupB;
+   p.setupCEnabled          = InpEnableSetupC;
+   p.setupCRequireADX       = InpSetupCRequireADX;
+   p.setupCMinBoxSize       = setupCMinBoxSize;
+   // Box quality
+   p.minBoxAgeMinutes       = InpMinBoxAgeMinutes;
+   p.minBoxTouches          = InpMinBoxTouches;
+   p.maxBoxTouches          = InpMaxBoxTouches;
+   // Wick sweep
+   p.requireWickSweep       = InpRequireWickSweep;
+   p.sweepBufferPrice       = sweepBufPrice;
+   // Dual M5 Stoch – forced on when in adaptive low-WR mode
+   p.requireM5StochConfirm  = InpRequireM5StochConfirm || lowWR;
+   // Rejection candle – forced on when in adaptive low-WR mode
+   p.requireRejectionCandle = InpRequireRejectionCandle || lowWR;
+   p.minWickBodyRatio       = InpMinWickBodyRatio;
+   // ATR expansion
+   p.requireATRExpansion    = InpRequireATRExpansion;
+   p.atrPeriod              = InpATRPeriod;
+   // H4 trend – forced on for Setup A when in adaptive low-WR mode
+   p.requireH4TrendAlign    = InpRequireH4TrendAlign || lowWR;
+   p.h4EmaFast              = InpH4EmaFast;
+   p.h4EmaSlow              = InpH4EmaSlow;
+   // Fib confluence
+   p.requireFibConfluence   = InpRequireFibConfluence;
+   p.fibTolerancePct        = InpFibTolerancePct;
+   // Expert filters
+   p.avoidRoundNumbers      = InpAvoidRoundNumbers;
+   p.roundNumRadiusPrice    = roundNumRadiusPrice;
+   p.minTickVolume          = InpMinTickVolume;
+   p.liquidityVoidFilter    = InpLiquidityVoidFilter;
+
+   // ── Strategy signal evaluation ────────────────────────────────────────────
    EntryScoreBreakdown score;
-   if(!g_scoring.Evaluate(symbol,
-                           InpAdxPeriod,
-                           InpAdxExhaustionLevel,
-                           InpAdxExpandingMin,
-                           InpAdxExpandingMax,
-                           InpAdxRangingThreshold,
-                           InpAdxExitWeakThreshold,
-                           InpRsiPeriod,
-                           InpRsiOversold,
-                           InpRsiOverbought,
-                           InpStochK,
-                           InpStochD,
-                           InpStochSlowing,
-                           InpStochOversold,
-                           InpStochOverbought,
-                           InpM5RangeLookback,
-                           InpBoxTolerancePct / 100.0,
-                           InpRequireZone,
-                           InpZoneLookback,
-                           InpZoneWingBars,
-                           InpZoneMinTouches,
-                           InpZoneTolerancePct,
-                           InpEnableSetupA,
-                           InpEnableSetupB,
-                           InpEnableSetupC,
-                           InpSetupCRequireADX,
-                           setupCMinBoxSize,
-                           score))
+   if(!g_scoring.Evaluate(symbol, p,
+                          InpRequireZone,
+                          InpZoneLookback,
+                          InpZoneWingBars,
+                          InpZoneMinTouches,
+                          InpZoneTolerancePct,
+                          score))
    {
       g_logger.LogDecision(symbol, false, "Signal evaluation failed");
       return;
@@ -508,9 +736,15 @@ void TryEntry(const string symbol)
       return;
    }
 
+   // ── Per-setup session window check ────────────────────────────────────────
+   if(!IsInSetupSessionWindow((SetupType)score.setup, TimeCurrent()))
+   {
+      g_logger.LogDecision(symbol, false,
+         StringFormat("Setup %d blocked outside session window", (int)score.setup));
+      return;
+   }
+
    // ── Pre-conditions (skipped entirely for Setup C – box-unrestricted mode) ──
-   // Setup C bypasses spread, low-liquidity, and candle-body filters so that
-   // pure Stochastic extreme entries are never blocked by market-structure gates.
    if(score.setup != SETUP_HFT_RANGE_SCALP)
    {
       int spreadPts = 0;
@@ -534,8 +768,10 @@ void TryEntry(const string symbol)
    }
 
    // ── Optional M15 bias alignment (skipped for Setup C) ────────────────────
+   // Also forced ON when in adaptive low-WR mode
+   bool requireBias = InpRequireM15Alignment || lowWR;
    BiasResult bias;
-   if(InpRequireM15Alignment && score.setup != SETUP_HFT_RANGE_SCALP)
+   if(requireBias && score.setup != SETUP_HFT_RANGE_SCALP)
    {
       if(!g_bias.Evaluate(symbol, InpEmaFast, InpEmaSlow, InpStructureLookback, bias))
       {
@@ -572,12 +808,10 @@ void TryEntry(const string symbol)
    MqlTick tick;
    if(!SymbolInfoTick(symbol, tick)) return;
    double point   = SymbolInfoDouble(symbol, SYMBOL_POINT);
-   double pipSize = OnePipPrice(symbol);              // price distance of 1 pip
+   double pipSize = OnePipPrice(symbol);
    double price   = (score.direction == STRAT_DIR_BUY) ? tick.ask : tick.bid;
 
-   // ── Slippage Protection: pre-entry box-edge distance check ───────────────
-   // Applies to Setup B only.  Setup C is box-unrestricted so
-   // the slippage gate is intentionally bypassed – price can be anywhere.
+   // ── Slippage Protection: pre-entry box-edge distance check (Setup B) ──────
    if(score.setup == SETUP_RANGE_SCALP)
    {
       if(score.boxHigh > 0.0 && score.boxLow > 0.0)
@@ -586,17 +820,16 @@ void TryEntry(const string symbol)
          double slipLimit   = maxSlipPips * pipSize;
          bool   priceOk     = false;
          if(score.direction == STRAT_DIR_BUY)
-            priceOk = (tick.ask <= score.boxLow + slipLimit);   // BUY near low
+            priceOk = (tick.ask <= score.boxLow + slipLimit);
          else
-            priceOk = (tick.bid >= score.boxHigh - slipLimit);  // SELL near high
+            priceOk = (tick.bid >= score.boxHigh - slipLimit);
 
          if(!priceOk)
          {
             g_logger.LogDecision(symbol, false,
                StringFormat("Slippage gate: price %.5f drifted >%.1f pips from box edge "
                             "(boxLow=%.5f boxHigh=%.5f) – entry skipped",
-                            price, maxSlipPips,
-                            score.boxLow, score.boxHigh));
+                            price, maxSlipPips, score.boxLow, score.boxHigh));
             return;
          }
       }
@@ -608,7 +841,6 @@ void TryEntry(const string symbol)
                         : ForexPipsToPoints(symbol, InpSlBufferPips);
    double slBuf       = slBufPoints * point;
 
-   // Minimum SL distance (prevents oversized lots when wick is very tight)
    int    minSlPoints = IsGold(symbol)
                         ? InpGoldSlPoints
                         : ForexPipsToPoints(symbol, InpFallbackSlPips);
@@ -619,7 +851,6 @@ void TryEntry(const string symbol)
    if(score.setup == SETUP_RUBBER_BAND &&
       score.signalBarHigh > 0.0 && score.signalBarLow > 0.0)
    {
-      // Setup A – SL just beyond the exhaustion sweep wick of the signal bar
       sl = (score.direction == STRAT_DIR_BUY)
            ? score.signalBarLow  - slBuf
            : score.signalBarHigh + slBuf;
@@ -627,29 +858,38 @@ void TryEntry(const string symbol)
    else if(score.setup == SETUP_RANGE_SCALP &&
            score.boxHigh > 0.0 && score.boxLow > 0.0)
    {
-      // Setup B – SL just outside the 5M structural box edge
-      sl = (score.direction == STRAT_DIR_BUY)
-           ? score.boxLow  - slBuf
-           : score.boxHigh + slBuf;
+      // If wick sweep was confirmed, use the sweep wick as the SL anchor (tighter)
+      if(score.wickSweepConfirmed && score.sweepWickLow > 0.0 && score.direction == STRAT_DIR_BUY)
+         sl = score.sweepWickLow - slBuf;
+      else if(score.wickSweepConfirmed && score.sweepWickHigh > 0.0 && score.direction == STRAT_DIR_SELL)
+         sl = score.sweepWickHigh + slBuf;
+      else
+         sl = (score.direction == STRAT_DIR_BUY)
+              ? score.boxLow  - slBuf
+              : score.boxHigh + slBuf;
    }
    else if(score.setup == SETUP_HFT_RANGE_SCALP &&
            score.boxHigh > 0.0 && score.boxLow > 0.0)
    {
-      // Setup C – SL just outside box edge using the tighter Setup-C-specific buffer
       double slCBuf = InpSetupCSLBufferPips * pipSize;
-      sl = (score.direction == STRAT_DIR_BUY)
-           ? score.boxLow  - slCBuf
-           : score.boxHigh + slCBuf;
+      // If wick sweep was confirmed, use the sweep wick as the SL anchor
+      if(score.wickSweepConfirmed && score.sweepWickLow > 0.0 && score.direction == STRAT_DIR_BUY)
+         sl = score.sweepWickLow - slCBuf;
+      else if(score.wickSweepConfirmed && score.sweepWickHigh > 0.0 && score.direction == STRAT_DIR_SELL)
+         sl = score.sweepWickHigh + slCBuf;
+      else
+         sl = (score.direction == STRAT_DIR_BUY)
+              ? score.boxLow  - slCBuf
+              : score.boxHigh + slCBuf;
    }
    else
    {
-      // Fallback – fixed pip distance
       sl = (score.direction == STRAT_DIR_BUY)
            ? price - minSlDist
            : price + minSlDist;
    }
 
-   // Enforce minimum SL distance (avoids dangerously large lots from tiny wicks)
+   // Enforce minimum SL distance
    double slDist = MathAbs(price - sl);
    if(slDist < minSlDist)
    {
@@ -660,11 +900,6 @@ void TryEntry(const string symbol)
    if(slPoints < 1) slPoints = 1;
 
    // ── TP Placement ──────────────────────────────────────────────────────────
-   // Setup C (Stoch+RSI filtered, box-unrestricted): large TP = InpRRMax × SL distance.
-   //   The box opposite wall is available but we use the full RRMax distance so
-   //   the trade rides the move as far as possible ("large TP" mode).
-   // Setup B: opposite box wall (natural range target); trailing then extends it.
-   // Setup A: hard TP at InpRRMax × SL distance; trailing activates at InpRRMin.
    double tp;
    if(score.setup == SETUP_HFT_RANGE_SCALP)
    {
@@ -693,7 +928,6 @@ void TryEntry(const string symbol)
    g_orderInFlight = false;
 
    // ── Post-fill slippage validation (Setup B only) ─────────────────────────
-   // Setup C is box-unrestricted – post-fill check skipped.
    if(opened && score.setup == SETUP_RANGE_SCALP)
    {
       if(score.boxHigh > 0.0 && score.boxLow > 0.0 && PositionSelect(symbol))
@@ -703,8 +937,6 @@ void TryEntry(const string symbol)
          double maxSlipPips = IsGold(symbol) ? InpSetupCMaxSlippagePipsGold : InpSetupCMaxSlippagePips;
          double slipLimit   = maxSlipPips * pipSize;
          bool   fillOk;
-         // BUY filled from below: fill should not be far above boxLow
-         // SELL filled from above: fill should not be far below boxHigh
          if(score.direction == STRAT_DIR_BUY)
             fillOk = (fillPrice <= boxEdge + slipLimit);
          else
@@ -727,14 +959,26 @@ void TryEntry(const string symbol)
    {
       g_openPositionSetup  = (SetupType)score.setup;
       g_lastEntrySignalBar = signalBar;
+      g_entryBoxHigh       = score.boxHigh;
+      g_entryBoxLow        = score.boxLow;
+      g_breakevenApplied   = false;
       g_risk.RegisterEntry(TimeCurrent());
+
+      // Notify partial close manager of new position
+      if(PositionSelect(symbol))
+      {
+         ulong ticket = PositionGetInteger(POSITION_TICKET);
+         g_partial.OnNewPosition(ticket);
+      }
 
       string setupName = (score.setup == SETUP_RUBBER_BAND)    ? "RubberBand"
                        : (score.setup == SETUP_RANGE_SCALP)    ? "RangeScalp"
                                                                 : "HFTRangeScalp";
       g_logger.LogDecision(symbol, true,
-                           StringFormat("Entry executed | setup=%s dir=%d",
-                                        setupName, score.direction));
+                           StringFormat("Entry executed | setup=%s dir=%d sweep=%s wr=%.0f%%",
+                                        setupName, score.direction,
+                                        score.wickSweepConfirmed ? "Y" : "N",
+                                        rollingWR));
    }
    else
    {
@@ -749,8 +993,14 @@ int OnInit()
 {
    g_logger.Init(InpDebugMode);
    g_risk.Init();
+   g_risk.SetRollingWindowSize(InpRollingWindowTrades);
    g_exec.Init(InpMagicNumber);
    g_scoring.Init();
+   g_news.Init(InpNewsWindowMinutes);
+   g_partial.Init(InpMagicNumber);
+
+   // Initialise session peak equity on startup
+   g_risk.UpdateSessionPeak(AccountInfoDouble(ACCOUNT_EQUITY));
 
    if(!IsAllowedSymbol(_Symbol))
    {
@@ -788,12 +1038,15 @@ int OnInit()
    }
 
    g_logger.Log(StringFormat(
-      "EA initialized (v2.30) | A=%s B=%s C=%s(adx=%s minBox=%.0fpips slipForex=%.1fpips slipGold=%.1fpips maxP=$%.0f)",
+      "EA initialized (v3.00) | A=%s B=%s C=%s | news=%s wickSweep=%s m5Stoch=%s h4Align=%s | adaptiveMode=%s",
       InpEnableSetupA ? "ON" : "OFF",
       InpEnableSetupB ? "ON" : "OFF",
       InpEnableSetupC ? "ON" : "OFF",
-      InpSetupCRequireADX ? "ON" : "OFF",
-      InpSetupCMinBoxSizePips, InpSetupCMaxSlippagePips, InpSetupCMaxSlippagePipsGold, InpSetupCMaxProfitDollar));
+      InpEnableNewsFilter     ? "ON" : "OFF",
+      InpRequireWickSweep     ? "ON" : "OFF",
+      InpRequireM5StochConfirm ? "ON" : "OFF",
+      InpRequireH4TrendAlign  ? "ON" : "OFF",
+      InpAdaptiveMode         ? "ON" : "OFF"));
    return INIT_SUCCEEDED;
 }
 
@@ -806,12 +1059,35 @@ void OnTick()
 {
    if(!IsAllowedSymbol(_Symbol)) return;
 
-   // Reset setup tracker when no position is open so the next entry starts clean
-   if(!PositionExistsForSymbol(_Symbol))
+   // Update session peak equity on every tick
+   g_risk.UpdateSessionPeak(AccountInfoDouble(ACCOUNT_EQUITY));
+
+   bool posOpen = PositionExistsForSymbol(_Symbol);
+
+   // Detect position close → record win/loss outcome for rolling win rate
+   if(g_prevPositionOpen && !posOpen)
+   {
+      bool wasWin = (g_prevPositionProfit >= 0.0);
+      g_risk.RecordTradeOutcome(wasWin);
+      g_partial.OnPositionClosed();
+      g_entryBoxHigh = 0.0;
+      g_entryBoxLow  = 0.0;
+      g_breakevenApplied = false;
+   }
+   g_prevPositionOpen = posOpen;
+   if(posOpen)
+      g_prevPositionProfit = PositionGetDouble(POSITION_PROFIT);
+
+   // Reset setup tracker when no position is open
+   if(!posOpen)
       g_openPositionSetup = SETUP_NONE;
 
    ManageOpenPosition(_Symbol);
 
    if(!NewM1Bar(_Symbol)) return;
+
+   // Daily session reset (rolling buffer + peak equity) at 00:00 UTC
+   g_risk.CheckDailyReset(TimeCurrent());
+
    TryEntry(_Symbol);
 }
