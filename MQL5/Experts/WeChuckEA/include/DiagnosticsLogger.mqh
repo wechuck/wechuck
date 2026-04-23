@@ -5,20 +5,24 @@ class CDiagnosticsLogger
 {
 private:
    bool m_enabled;
-   long m_setupACount;   // Setup A "Rubber Band" signals that passed all filters
-   long m_setupBCount;   // Setup B "Range Scalp" signals that passed all filters
-   long m_setupCCount;   // Setup C "HFT Range Scalp" signals that passed all filters
-   long m_setupFCount;   // Setup F "Weekly Precision Scalp" signals that passed all filters
+   long m_setupACount;   // Setup A – London Liquidity Sweep
+   long m_setupBCount;   // Setup B – H4 Order Block Retest
+   long m_setupCCount;   // Setup C – Fair Value Gap Fill
+   long m_setupDCount;   // Setup D – Daily Pivot Bounce
+   long m_setupECount;   // Setup E – Market Structure Shift Retest
+   long m_setupFCount;   // Setup F – Weekly High/Low Sniper (20-pip challenge)
    long m_rejectedCount; // Evaluations that produced no valid signal
 
 public:
    void Init(const bool enabled)
    {
-      m_enabled      = enabled;
-      m_setupACount  = 0;
-      m_setupBCount  = 0;
-      m_setupCCount  = 0;
-      m_setupFCount  = 0;
+      m_enabled       = enabled;
+      m_setupACount   = 0;
+      m_setupBCount   = 0;
+      m_setupCCount   = 0;
+      m_setupDCount   = 0;
+      m_setupECount   = 0;
+      m_setupFCount   = 0;
       m_rejectedCount = 0;
    }
 
@@ -26,17 +30,6 @@ public:
    {
       if(!m_enabled) return;
       Print("[WECHUCK] ", msg);
-   }
-
-   void LogScore(const string symbol, const int setup, const int direction,
-                 const double adx1M, const double adx5M,
-                 const double stochK, const double rsiCur,
-                 const string details)
-   {
-      if(!m_enabled) return;
-      PrintFormat("[WECHUCK][SIGNAL] %s setup=%d dir=%d adx1M=%.1f adx5M=%.1f "
-                  "stochK=%.1f rsi=%.1f | %s",
-                  symbol, setup, direction, adx1M, adx5M, stochK, rsiCur, details);
    }
 
    void LogDecision(const string symbol, const bool accepted, const string reason)
@@ -56,23 +49,29 @@ public:
                   symbol, action, retcode, spreadPoints, slippagePoints, latencyMs);
    }
 
-   // Call once per bar after a valid signal is detected (before entry filter).
-   void TrackContribution(const bool isSetupA, const bool isSetupB,
-                          const bool isSetupC, const bool isSetupF)
+   // Called once per detected signal (before final entry gates).
+   void TrackContribution(const bool isA, const bool isB, const bool isC,
+                          const bool isD, const bool isE, const bool isF)
    {
-      if(isSetupA) m_setupACount++;
-      if(isSetupB) m_setupBCount++;
-      if(isSetupC) m_setupCCount++;
-      if(isSetupF) m_setupFCount++;
-      if(!isSetupA && !isSetupB && !isSetupC && !isSetupF) m_rejectedCount++;
+      if(isA) m_setupACount++;
+      if(isB) m_setupBCount++;
+      if(isC) m_setupCCount++;
+      if(isD) m_setupDCount++;
+      if(isE) m_setupECount++;
+      if(isF) m_setupFCount++;
+      if(!isA && !isB && !isC && !isD && !isE && !isF) m_rejectedCount++;
    }
 
    void DumpStats()
    {
       if(!m_enabled) return;
-      PrintFormat("[WECHUCK][STATS] SetupA(RubberBand)=%ld  SetupB(RangeScalp)=%ld  "
-                  "SetupC(HFTRangeScalp)=%ld  SetupF(WeeklyPrecision)=%ld  Rejected=%ld",
-                  m_setupACount, m_setupBCount, m_setupCCount, m_setupFCount, m_rejectedCount);
+      PrintFormat(
+         "[WECHUCK][STATS] "
+         "A(LondonSweep)=%ld  B(OBRetest)=%ld  C(FVGFill)=%ld  "
+         "D(PivotBounce)=%ld  E(MSSRetest)=%ld  F(WeeklySniper)=%ld  "
+         "Rejected=%ld",
+         m_setupACount, m_setupBCount, m_setupCCount,
+         m_setupDCount, m_setupECount, m_setupFCount, m_rejectedCount);
    }
 };
 
