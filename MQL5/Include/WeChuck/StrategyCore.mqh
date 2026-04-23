@@ -117,7 +117,9 @@ private:
 
    bool IsGoldSymbol(const string symbol)
    {
-      return (StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0);
+      string upper = symbol;
+      StringToUpper(upper);
+      return (StringFind(upper, "XAU") >= 0 || StringFind(upper, "GOLD") >= 0);
    }
 
    // Returns H4 EMA bias: 1=bullish, -1=bearish, 0=neutral/flat

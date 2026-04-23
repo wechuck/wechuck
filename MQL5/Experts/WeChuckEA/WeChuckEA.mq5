@@ -192,13 +192,15 @@ datetime  g_setupFWeekStart        = 0;
 //──────────────────────────────────────────────────────────────────────────────
 bool IsAllowedSymbol(const string symbol)
 {
-   return (StringFind(symbol, "EURUSD") >= 0 ||
-           StringFind(symbol, "GBPUSD") >= 0 ||
-           StringFind(symbol, "GBPAUD") >= 0 ||
-           StringFind(symbol, "AUDNZD") >= 0 ||
-           StringFind(symbol, "AUDJPY") >= 0 ||
-           StringFind(symbol, "XAUUSD") >= 0 ||
-           StringFind(symbol, "GOLD")   >= 0);
+   string upper = symbol;
+   StringToUpper(upper);
+   return (StringFind(upper, "EURUSD") >= 0 ||
+           StringFind(upper, "GBPUSD") >= 0 ||
+           StringFind(upper, "GBPAUD") >= 0 ||
+           StringFind(upper, "AUDNZD") >= 0 ||
+           StringFind(upper, "AUDJPY") >= 0 ||
+           StringFind(upper, "XAUUSD") >= 0 ||
+           StringFind(upper, "GOLD")   >= 0);
 }
 
 bool IsGold(const string symbol)
