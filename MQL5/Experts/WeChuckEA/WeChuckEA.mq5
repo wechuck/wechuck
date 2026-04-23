@@ -220,6 +220,7 @@ input double InpSetupFSLBufferPips       = 3.0;    // SL buffer beyond the weekl
 input double InpSetupFRiskPct            = 30.0;   // Risk % per trade (20-pip challenge table: 30%)
 input int    InpSetupF_StartHour         = 2;      // Setup F session start hour UTC
 input int    InpSetupF_EndHour           = 21;     // Setup F session end hour UTC
+input int    InpSetupFTimeExitBars       = 480;    // Max M1 bars before time-exit (~8 h at 1-min bars)
 
 //──────────────────────────────────────────────────────────────────────────────
 // Globals
@@ -425,10 +426,11 @@ double ComputeLotSize(const string symbol, const int slPoints)
 void ResetSetupFWeeklyCounterIfNeeded()
 {
    MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
+   // Use TimeGMT() to guarantee UTC regardless of broker server timezone.
+   TimeToStruct(TimeGMT(), dt);
    // day_of_week: 0=Sunday, 1=Monday … 6=Saturday
    int      daysSinceMon = (dt.day_of_week == 0) ? 6 : dt.day_of_week - 1;
-   datetime curWeekMon   = TimeCurrent() -
+   datetime curWeekMon   = TimeGMT() -
                            (datetime)((long)daysSinceMon * 86400 +
                                       dt.hour * 3600 + dt.min * 60 + dt.sec);
    if(curWeekMon > g_setupFWeekStart)
@@ -605,11 +607,13 @@ void ManageOpenPosition(const string symbol)
    }
 
    // ── Time-based exit ───────────────────────────────────────────────────────
-   // Setup F uses a longer timeout (pip-target may take several hours to hit).
-   // 480 M1 bars ≈ 8 hours, giving enough time to reach 20 or 50 pips.
+   // Setup F uses a configurable longer timeout (default 480 M1 bars ≈ 8 hours)
+   // to allow enough time for the fixed pip-target to be reached.
    if(!PositionSelect(symbol)) return;
    int barsSinceOpen = iBarShift(symbol, PERIOD_M1, openTime, true);
-   int timeExitBars  = (g_openPositionSetup == SETUP_WEEKLY_PRECISION) ? 480 : InpTimeExitBars;
+   int timeExitBars  = (g_openPositionSetup == SETUP_WEEKLY_PRECISION)
+                       ? InpSetupFTimeExitBars
+                       : InpTimeExitBars;
    if(barsSinceOpen >= timeExitBars && timeExitBars > 0)
    {
       g_logger.LogDecision(symbol, false, "Time-based exit");
