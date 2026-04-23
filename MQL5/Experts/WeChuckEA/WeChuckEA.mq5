@@ -15,7 +15,6 @@
 
 #include "include/Types.mqh"
 #include "include/DiagnosticsLogger.mqh"
-#include "include/MarketStructureFilter.mqh"
 #include "include/EntryScoring.mqh"
 #include "include/RiskManager.mqh"
 #include "include/ExecutionManager.mqh"
@@ -162,7 +161,6 @@ input bool InpAutoAttachSignal   = false; // Attach WeChuckSignal indicator to c
 // Globals
 //──────────────────────────────────────────────────────────────────────────────
 CDiagnosticsLogger     g_logger;
-CMarketStructureFilter g_bias;
 CEntryScoring          g_scoring;
 CRiskManager           g_risk;
 CExecutionManager      g_exec;

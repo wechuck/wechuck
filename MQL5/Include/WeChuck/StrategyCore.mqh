@@ -135,7 +135,7 @@ private:
          if(hSlow  != INVALID_HANDLE) IndicatorRelease(hSlow);
          return false;
       }
-      double fast[1], slow[1];
+      double fast[], slow[];
       ArraySetAsSeries(fast, true);
       ArraySetAsSeries(slow, true);
       bool ok = (CopyBuffer(hFast, 0, 1, 1, fast) >= 1 &&
@@ -152,7 +152,7 @@ private:
    // and the candle body must close in the reversal direction.
    bool IsM15RejectionCandle(const string symbol, const int dir)
    {
-      MqlRates m15[1];
+      MqlRates m15[];
       ArraySetAsSeries(m15, true);
       if(CopyRates(symbol, PERIOD_M15, 1, 1, m15) < 1) return false;
       double range = m15[0].high - m15[0].low;
@@ -227,7 +227,7 @@ private:
                          const double sweepBuf, double &outWick)
    {
       outWick = 0.0;
-      MqlRates m15[1];
+      MqlRates m15[];
       ArraySetAsSeries(m15, true);
       if(CopyRates(symbol, PERIOD_M15, 1, 1, m15) < 1) return false;
 
@@ -544,7 +544,7 @@ private:
                              double &outSweepWick)
    {
       outSweepWick = 0.0;
-      MqlRates m15[1];
+      MqlRates m15[];
       ArraySetAsSeries(m15, true);
       if(CopyRates(symbol, PERIOD_M15, 1, 1, m15) < 1) return false;
 
@@ -571,7 +571,7 @@ private:
    {
       int h = iStochastic(symbol, PERIOD_M15, kP, dP, slowing, MODE_SMA, STO_LOWHIGH);
       if(h == INVALID_HANDLE) return 0;
-      double kBuf[2], dBuf[2];
+      double kBuf[], dBuf[];
       ArraySetAsSeries(kBuf, true);
       ArraySetAsSeries(dBuf, true);
       bool ok = (CopyBuffer(h, 0, 1, 2, kBuf) >= 2 &&
@@ -613,7 +613,7 @@ public:
 
       // ── Capture the last closed M15 bar for SL anchoring ─────────────────
       {
-         MqlRates m15b[1];
+         MqlRates m15b[];
          ArraySetAsSeries(m15b, true);
          if(CopyRates(symbol, PERIOD_M15, 1, 1, m15b) == 1)
          {
