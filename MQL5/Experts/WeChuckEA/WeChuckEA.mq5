@@ -208,6 +208,19 @@ input double InpSetupCMaxProfitDollar = 15.0;
 input double InpSetupCMaxSlippagePips     = 2.0;
 input double InpSetupCMaxSlippagePipsGold = 50.0;
 
+input group "Setup F – Weekly Precision Scalp"
+input bool   InpEnableSetupF             = true;   // Enable Setup F (20-pip challenge)
+input int    InpSetupFPipTarget          = 20;     // Net pip target per trade (20 or 50)
+input double InpSetupFSpreadCommPips     = 2.0;    // Extra pips added to TP to cover spread+commission
+input double InpSetupFWeeklySweepBufPips = 15.0;  // Max wick pierce beyond weekly level (pips)
+input bool   InpSetupFRequireH4Align     = true;   // H4 EMA must not oppose direction
+input bool   InpSetupFRequireM15Stoch    = true;   // M15 Stochastic must cross from extreme
+input int    InpSetupFMaxWeeklyTrades    = 3;      // Max Setup F trades per calendar week (Mon–Sun)
+input double InpSetupFSLBufferPips       = 3.0;    // SL buffer beyond the weekly sweep wick (pips)
+input double InpSetupFRiskPct            = 30.0;   // Risk % per trade (20-pip challenge table: 30%)
+input int    InpSetupF_StartHour         = 2;      // Setup F session start hour UTC
+input int    InpSetupF_EndHour           = 21;     // Setup F session end hour UTC
+
 //──────────────────────────────────────────────────────────────────────────────
 // Globals
 //──────────────────────────────────────────────────────────────────────────────
@@ -232,6 +245,10 @@ bool      g_breakevenApplied   = false;
 // Position state for win/loss outcome detection
 bool      g_prevPositionOpen   = false;
 double    g_prevPositionProfit = 0.0;
+
+// Setup F – weekly trade counter (reset each Mon 00:00 UTC)
+int       g_setupFWeeklyTradeCount = 0;
+datetime  g_setupFWeekStart        = 0;
 
 //──────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -304,6 +321,10 @@ bool IsInSetupSessionWindow(const SetupType setup, const datetime now)
       // Skip the first N minutes of London open (avoid box-break period)
       if(hour == InpSetupC_StartHour && min < InpSetupC_SkipLondonOpenMinutes) return false;
       return true;
+   }
+   if(setup == SETUP_WEEKLY_PRECISION)
+   {
+      return (hour >= InpSetupF_StartHour && hour < InpSetupF_EndHour);
    }
    return true;
 }
@@ -395,6 +416,54 @@ double ComputeLotSize(const string symbol, const int slPoints)
       lot = MathMax(safeMin, MathFloor((lot * ddFactor) / stepVolume) * stepVolume);
    }
    return NormalizeDouble(lot, 2);
+}
+
+//──────────────────────────────────────────────────────────────────────────────
+// ResetSetupFWeeklyCounterIfNeeded
+// Detects Monday 00:00 UTC rollover and zeros the weekly trade counter.
+//──────────────────────────────────────────────────────────────────────────────
+void ResetSetupFWeeklyCounterIfNeeded()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   // day_of_week: 0=Sunday, 1=Monday … 6=Saturday
+   int      daysSinceMon = (dt.day_of_week == 0) ? 6 : dt.day_of_week - 1;
+   datetime curWeekMon   = TimeCurrent() -
+                           (datetime)((long)daysSinceMon * 86400 +
+                                      dt.hour * 3600 + dt.min * 60 + dt.sec);
+   if(curWeekMon > g_setupFWeekStart)
+   {
+      g_setupFWeekStart        = curWeekMon;
+      g_setupFWeeklyTradeCount = 0;
+   }
+}
+
+//──────────────────────────────────────────────────────────────────────────────
+// ComputeSetupFLotSize
+// Sizes the lot for Setup F using the 20-pip challenge risk table:
+// risk = InpSetupFRiskPct (default 30%) of current account equity.
+//──────────────────────────────────────────────────────────────────────────────
+double ComputeSetupFLotSize(const string symbol, const int slPoints)
+{
+   double equity           = AccountInfoDouble(ACCOUNT_EQUITY);
+   double riskAmount       = equity * InpSetupFRiskPct / 100.0;
+   double point            = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   double tickSize         = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tickValue        = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickSize <= 0.0 || point <= 0.0) return InpFixedLot;
+   double pointValuePerLot = (point / tickSize) * tickValue;
+   if(pointValuePerLot <= 0.0) return InpFixedLot;
+   double slValue = slPoints * pointValuePerLot;
+   if(slValue <= 0.0) return InpFixedLot;
+   double rawLot     = riskAmount / slValue;
+   double minVolume  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   double maxVolume  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+   double stepVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   if(stepVolume <= 0.0) stepVolume = (minVolume > 0.0 ? minVolume : 0.01);
+   double lot     = MathFloor(rawLot / stepVolume) * stepVolume;
+   double safeMin = (minVolume > 0.0 ? minVolume : 0.01);
+   double safeMax = (maxVolume > 0.0 ? maxVolume : 100.0);
+   return NormalizeDouble(MathMax(safeMin, MathMin(lot, safeMax)), 2);
 }
 
 //──────────────────────────────────────────────────────────────────────────────
@@ -536,9 +605,12 @@ void ManageOpenPosition(const string symbol)
    }
 
    // ── Time-based exit ───────────────────────────────────────────────────────
+   // Setup F uses a longer timeout (pip-target may take several hours to hit).
+   // 480 M1 bars ≈ 8 hours, giving enough time to reach 20 or 50 pips.
    if(!PositionSelect(symbol)) return;
    int barsSinceOpen = iBarShift(symbol, PERIOD_M1, openTime, true);
-   if(barsSinceOpen >= InpTimeExitBars && InpTimeExitBars > 0)
+   int timeExitBars  = (g_openPositionSetup == SETUP_WEEKLY_PRECISION) ? 480 : InpTimeExitBars;
+   if(barsSinceOpen >= timeExitBars && timeExitBars > 0)
    {
       g_logger.LogDecision(symbol, false, "Time-based exit");
       g_exec.CloseSymbolPosition(symbol, g_logger);
@@ -547,9 +619,11 @@ void ManageOpenPosition(const string symbol)
 
    // ── Dynamic exit (only when in profit – protect winners) ─────────────────
    // Skipped for Setup C – those trades close only by TP, SL, time exit, or max-profit cap.
+   // Skipped for Setup F – fixed pip-target TP handles the exit.
    if(!PositionSelect(symbol)) return;
    double posProfit = PositionGetDouble(POSITION_PROFIT);
-   if(g_openPositionSetup != SETUP_HFT_RANGE_SCALP && posProfit > 0.0)
+   if(g_openPositionSetup != SETUP_HFT_RANGE_SCALP &&
+      g_openPositionSetup != SETUP_WEEKLY_PRECISION && posProfit > 0.0)
    {
       StrategyParams exitP;
       exitP.adxPeriod            = InpAdxPeriod;
@@ -712,6 +786,11 @@ void TryEntry(const string symbol)
    p.roundNumRadiusPrice    = roundNumRadiusPrice;
    p.minTickVolume          = InpMinTickVolume;
    p.liquidityVoidFilter    = InpLiquidityVoidFilter;
+   // Setup F – Weekly Precision Scalp
+   p.setupFEnabled          = InpEnableSetupF;
+   p.setupFWeeklySweepBuf   = InpSetupFWeeklySweepBufPips * OnePipPrice(symbol);
+   p.setupFRequireH4Align   = InpSetupFRequireH4Align;
+   p.setupFRequireM15Stoch  = InpSetupFRequireM15Stoch;
 
    // ── Strategy signal evaluation ────────────────────────────────────────────
    EntryScoreBreakdown score;
@@ -733,7 +812,8 @@ void TryEntry(const string symbol)
 
    g_logger.TrackContribution(score.setup == SETUP_RUBBER_BAND,
                                score.setup == SETUP_RANGE_SCALP,
-                               score.setup == SETUP_HFT_RANGE_SCALP);
+                               score.setup == SETUP_HFT_RANGE_SCALP,
+                               score.setup == SETUP_WEEKLY_PRECISION);
 
    if(!score.valid)
    {
@@ -749,8 +829,21 @@ void TryEntry(const string symbol)
       return;
    }
 
-   // ── Pre-conditions (skipped entirely for Setup C – box-unrestricted mode) ──
-   if(score.setup != SETUP_HFT_RANGE_SCALP)
+   // ── Setup F: weekly trade cap ─────────────────────────────────────────────
+   if(score.setup == SETUP_WEEKLY_PRECISION)
+   {
+      ResetSetupFWeeklyCounterIfNeeded();
+      if(InpSetupFMaxWeeklyTrades > 0 && g_setupFWeeklyTradeCount >= InpSetupFMaxWeeklyTrades)
+      {
+         g_logger.LogDecision(symbol, false,
+            StringFormat("Setup F weekly cap reached (%d/%d) – waiting for next week",
+                         g_setupFWeeklyTradeCount, InpSetupFMaxWeeklyTrades));
+         return;
+      }
+   }
+
+   // ── Pre-conditions (skipped entirely for Setup C and F – box-unrestricted mode) ──
+   if(score.setup != SETUP_HFT_RANGE_SCALP && score.setup != SETUP_WEEKLY_PRECISION)
    {
       int spreadPts = 0;
       if(!CheckSpreadOk(symbol, spreadPts))
@@ -776,7 +869,8 @@ void TryEntry(const string symbol)
    // Also forced ON when in adaptive low-WR mode
    bool requireBias = InpRequireM15Alignment || lowWR;
    BiasResult bias;
-   if(requireBias && score.setup != SETUP_HFT_RANGE_SCALP)
+   if(requireBias && score.setup != SETUP_HFT_RANGE_SCALP &&
+      score.setup != SETUP_WEEKLY_PRECISION)
    {
       if(!g_bias.Evaluate(symbol, InpEmaFast, InpEmaSlow, InpStructureLookback, bias))
       {
@@ -887,6 +981,18 @@ void TryEntry(const string symbol)
               ? score.boxLow  - slCBuf
               : score.boxHigh + slCBuf;
    }
+   else if(score.setup == SETUP_WEEKLY_PRECISION)
+   {
+      // SL placed beyond the M15 weekly-level sweep wick plus a configurable buffer.
+      // The sweep wick anchors are stored in sweepWickLow (BUY) / sweepWickHigh (SELL).
+      double slFBuf = InpSetupFSLBufferPips * pipSize;
+      if(score.direction == STRAT_DIR_BUY && score.sweepWickLow > 0.0)
+         sl = score.sweepWickLow - slFBuf;
+      else if(score.direction == STRAT_DIR_SELL && score.sweepWickHigh > 0.0)
+         sl = score.sweepWickHigh + slFBuf;
+      else
+         sl = (score.direction == STRAT_DIR_BUY) ? price - minSlDist : price + minSlDist;
+   }
    else
    {
       sl = (score.direction == STRAT_DIR_BUY)
@@ -912,6 +1018,16 @@ void TryEntry(const string symbol)
            ? price + slDist * InpRRMax
            : price - slDist * InpRRMax;
    }
+   else if(score.setup == SETUP_WEEKLY_PRECISION)
+   {
+      // Fixed pip-target TP (net after spread/commission).
+      // Gross pips = pipTarget + spreadCommPips so the NET gain equals pipTarget.
+      double grossTPPips = InpSetupFPipTarget + InpSetupFSpreadCommPips;
+      double grossTPDist = grossTPPips * pipSize;
+      tp = (score.direction == STRAT_DIR_BUY)
+           ? price + grossTPDist
+           : price - grossTPDist;
+   }
    else if(score.setup == SETUP_RANGE_SCALP &&
            score.boxHigh > 0.0 && score.boxLow > 0.0)
    {
@@ -926,7 +1042,9 @@ void TryEntry(const string symbol)
 
    // ── Execute ───────────────────────────────────────────────────────────────
    g_orderInFlight = true;
-   double lotSize = ComputeLotSize(symbol, slPoints);
+   double lotSize = (score.setup == SETUP_WEEKLY_PRECISION)
+                    ? ComputeSetupFLotSize(symbol, slPoints)
+                    : ComputeLotSize(symbol, slPoints);
    bool   opened  = g_exec.Open(symbol, score.direction, lotSize,
                                 InpMaxDeviationPoints, InpOrderRetries,
                                 sl, tp, g_logger);
@@ -969,6 +1087,10 @@ void TryEntry(const string symbol)
       g_breakevenApplied   = false;
       g_risk.RegisterEntry(TimeCurrent());
 
+      // Increment weekly trade counter for Setup F
+      if(score.setup == SETUP_WEEKLY_PRECISION)
+         g_setupFWeeklyTradeCount++;
+
       // Notify partial close manager of new position
       if(PositionSelect(symbol))
       {
@@ -976,9 +1098,10 @@ void TryEntry(const string symbol)
          g_partial.OnNewPosition(ticket);
       }
 
-      string setupName = (score.setup == SETUP_RUBBER_BAND)    ? "RubberBand"
-                       : (score.setup == SETUP_RANGE_SCALP)    ? "RangeScalp"
-                                                                : "HFTRangeScalp";
+      string setupName = (score.setup == SETUP_RUBBER_BAND)       ? "RubberBand"
+                       : (score.setup == SETUP_RANGE_SCALP)       ? "RangeScalp"
+                       : (score.setup == SETUP_HFT_RANGE_SCALP)   ? "HFTRangeScalp"
+                                                                   : "WeeklyPrecision";
       g_logger.LogDecision(symbol, true,
                            StringFormat("Entry executed | setup=%s dir=%d sweep=%s wr=%.0f%%",
                                         setupName, score.direction,
@@ -1043,10 +1166,13 @@ int OnInit()
    }
 
    g_logger.Log(StringFormat(
-      "EA initialized (v3.00) | A=%s B=%s C=%s | news=%s wickSweep=%s m5Stoch=%s h4Align=%s | adaptiveMode=%s",
+      "EA initialized (v3.10) | A=%s B=%s C=%s F=%s(target=%dpips,risk=%.0f%%,maxWkly=%d)"
+      " | news=%s wickSweep=%s m5Stoch=%s h4Align=%s | adaptiveMode=%s",
       InpEnableSetupA ? "ON" : "OFF",
       InpEnableSetupB ? "ON" : "OFF",
       InpEnableSetupC ? "ON" : "OFF",
+      InpEnableSetupF ? "ON" : "OFF",
+      InpSetupFPipTarget, InpSetupFRiskPct, InpSetupFMaxWeeklyTrades,
       InpEnableNewsFilter     ? "ON" : "OFF",
       InpRequireWickSweep     ? "ON" : "OFF",
       InpRequireM5StochConfirm ? "ON" : "OFF",
@@ -1095,6 +1221,9 @@ void OnTick()
 
    // Daily session reset (rolling buffer + peak equity) at 00:00 UTC
    g_risk.CheckDailyReset(TimeCurrent());
+
+   // Setup F weekly counter rollover check (Mon 00:00 UTC)
+   ResetSetupFWeeklyCounterIfNeeded();
 
    TryEntry(_Symbol);
 }

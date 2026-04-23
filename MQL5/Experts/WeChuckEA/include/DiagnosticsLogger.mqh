@@ -8,6 +8,7 @@ private:
    long m_setupACount;   // Setup A "Rubber Band" signals that passed all filters
    long m_setupBCount;   // Setup B "Range Scalp" signals that passed all filters
    long m_setupCCount;   // Setup C "HFT Range Scalp" signals that passed all filters
+   long m_setupFCount;   // Setup F "Weekly Precision Scalp" signals that passed all filters
    long m_rejectedCount; // Evaluations that produced no valid signal
 
 public:
@@ -17,6 +18,7 @@ public:
       m_setupACount  = 0;
       m_setupBCount  = 0;
       m_setupCCount  = 0;
+      m_setupFCount  = 0;
       m_rejectedCount = 0;
    }
 
@@ -55,20 +57,22 @@ public:
    }
 
    // Call once per bar after a valid signal is detected (before entry filter).
-   void TrackContribution(const bool isSetupA, const bool isSetupB, const bool isSetupC)
+   void TrackContribution(const bool isSetupA, const bool isSetupB,
+                          const bool isSetupC, const bool isSetupF)
    {
       if(isSetupA) m_setupACount++;
       if(isSetupB) m_setupBCount++;
       if(isSetupC) m_setupCCount++;
-      if(!isSetupA && !isSetupB && !isSetupC) m_rejectedCount++;
+      if(isSetupF) m_setupFCount++;
+      if(!isSetupA && !isSetupB && !isSetupC && !isSetupF) m_rejectedCount++;
    }
 
    void DumpStats()
    {
       if(!m_enabled) return;
       PrintFormat("[WECHUCK][STATS] SetupA(RubberBand)=%ld  SetupB(RangeScalp)=%ld  "
-                  "SetupC(HFTRangeScalp)=%ld  Rejected=%ld",
-                  m_setupACount, m_setupBCount, m_setupCCount, m_rejectedCount);
+                  "SetupC(HFTRangeScalp)=%ld  SetupF(WeeklyPrecision)=%ld  Rejected=%ld",
+                  m_setupACount, m_setupBCount, m_setupCCount, m_setupFCount, m_rejectedCount);
    }
 };
 

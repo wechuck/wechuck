@@ -17,10 +17,11 @@
 
 enum SetupType
 {
-   SETUP_NONE           = 0,  // No valid signal
-   SETUP_RUBBER_BAND    = 1,  // Setup A – high ADX exhaustion reversal
-   SETUP_RANGE_SCALP    = 2,  // Setup B – low ADX range bounce (with Stoch cross)
-   SETUP_HFT_RANGE_SCALP = 3  // Setup C – HFT box-touch scalp (no Stoch cross required)
+   SETUP_NONE             = 0,  // No valid signal
+   SETUP_RUBBER_BAND      = 1,  // Setup A – high ADX exhaustion reversal
+   SETUP_RANGE_SCALP      = 2,  // Setup B – low ADX range bounce (with Stoch cross)
+   SETUP_HFT_RANGE_SCALP  = 3,  // Setup C – HFT box-touch scalp (no Stoch cross required)
+   SETUP_WEEKLY_PRECISION = 4   // Setup F – weekly key-level sweep precision scalp
 };
 
 // ── Parameter bundle ─────────────────────────────────────────────────────────
@@ -94,6 +95,14 @@ struct StrategyParams
    double roundNumRadiusPrice;    // Avoidance radius in price units (pre-converted from pips)
    int    minTickVolume;          // Min tick volume on the signal bar (0 = off)
    bool   liquidityVoidFilter;    // Block entry if bar range > 3× M1 ATR (gap / void)
+
+   // ── Setup F – Weekly Precision Scalp ─────────────────────────────────────
+   // Ultra-selective: targets prior week's high / low sweep on M15.
+   // 2-3 trades per week, net 20 or 50 pips after spread and commissions.
+   bool   setupFEnabled;          // Master switch for Setup F
+   double setupFWeeklySweepBuf;   // Max wick pierce beyond weekly level (price units)
+   bool   setupFRequireH4Align;   // H4 EMA fast>slow (bullish) required for BUY, reverse for SELL
+   bool   setupFRequireM15Stoch;  // M15 Stochastic must cross from extreme (confirms direction)
 };
 
 // ── Signal output ─────────────────────────────────────────────────────────────
@@ -484,6 +493,95 @@ private:
    }
 
    //──────────────────────────────────────────────────────────────────────────
+   // GetWeeklyHighLow – returns the prior completed week's high / low and the
+   // current (developing) week's high / low from W1 bars.
+   // bar[0] on W1 = current incomplete week; bar[1] = last completed week.
+   //──────────────────────────────────────────────────────────────────────────
+   bool GetWeeklyHighLow(const string symbol,
+                         double &priorHigh, double &priorLow,
+                         double &curHigh,   double &curLow)
+   {
+      priorHigh = priorLow = curHigh = curLow = 0.0;
+      MqlRates weekly[];
+      ArraySetAsSeries(weekly, true);
+      int copied = CopyRates(symbol, PERIOD_W1, 0, 2, weekly);
+      if(copied < 2) return false;
+      priorHigh = weekly[1].high;   // last fully closed week
+      priorLow  = weekly[1].low;
+      curHigh   = weekly[0].high;   // current developing week
+      curLow    = weekly[0].low;
+      return true;
+   }
+
+   //──────────────────────────────────────────────────────────────────────────
+   // CheckM15WeeklySweep – validates wick-pierce-and-close-back on the last
+   // closed M15 bar (bar[1]) against the given weekly level.
+   // BUY : bar[1].low pierced below weeklyLevel, closed back above → stop-hunt sweep.
+   // SELL: bar[1].high pierced above weeklyLevel, closed back below.
+   // outSweepWick holds the extreme of the sweep wick for SL placement.
+   //──────────────────────────────────────────────────────────────────────────
+   bool CheckM15WeeklySweep(const string symbol, const int direction,
+                             const double weeklyLevel, const double sweepBuf,
+                             double &outSweepWick)
+   {
+      outSweepWick = 0.0;
+      MqlRates m15[1];
+      ArraySetAsSeries(m15, true);
+      if(CopyRates(symbol, PERIOD_M15, 1, 1, m15) < 1) return false;
+
+      if(direction == STRAT_DIR_BUY)
+      {
+         if(m15[0].low  <  weeklyLevel             &&
+            m15[0].low  >= weeklyLevel - sweepBuf  &&
+            m15[0].close >  weeklyLevel)
+         {
+            outSweepWick = m15[0].low;
+            return true;
+         }
+      }
+      else if(direction == STRAT_DIR_SELL)
+      {
+         if(m15[0].high >  weeklyLevel             &&
+            m15[0].high <= weeklyLevel + sweepBuf  &&
+            m15[0].close <  weeklyLevel)
+         {
+            outSweepWick = m15[0].high;
+            return true;
+         }
+      }
+      return false;
+   }
+
+   //──────────────────────────────────────────────────────────────────────────
+   // GetM15StochCrossDir – checks whether the M15 Stochastic K just crossed
+   // from an extreme on bar[1] (the last closed M15 bar).
+   // Returns:  1 = bullish cross from oversold   (matches STRAT_DIR_BUY)
+   //          -1 = bearish cross from overbought  (matches STRAT_DIR_SELL)
+   //           0 = no qualifying cross
+   //──────────────────────────────────────────────────────────────────────────
+   int GetM15StochCrossDir(const string symbol,
+                            const int kPeriod, const int dPeriod, const int slowing,
+                            const double oversold, const double overbought)
+   {
+      int h = iStochastic(symbol, PERIOD_M15, kPeriod, dPeriod, slowing,
+                          MODE_SMA, STO_LOWHIGH);
+      if(h == INVALID_HANDLE) return 0;
+
+      double kBuf[2], dBuf[2];
+      ArraySetAsSeries(kBuf, true);
+      ArraySetAsSeries(dBuf, true);
+      // [0] = M15 bar[1] (last closed bar), [1] = M15 bar[2] (one bar prior)
+      bool ok = (CopyBuffer(h, 0, 1, 2, kBuf) >= 2 &&
+                 CopyBuffer(h, 1, 1, 2, dBuf) >= 2);
+      IndicatorRelease(h);
+      if(!ok) return 0;
+
+      if(kBuf[1] <= oversold  && kBuf[1] <= dBuf[1] && kBuf[0] > dBuf[0]) return  1;
+      if(kBuf[1] >= overbought && kBuf[1] >= dBuf[1] && kBuf[0] < dBuf[0]) return -1;
+      return 0;
+   }
+
+   //──────────────────────────────────────────────────────────────────────────
    // Setup A BUY trigger:
    //   Stochastic K was in the oversold zone on the previous closed bar AND
    //   K has now crossed above D (bullish K/D cross).
@@ -722,6 +820,100 @@ public:
          }
       }
 
+      // ── SETUP F: "Weekly Precision Scalp" ─────────────────────────────────
+      // Fires when the last closed M15 bar made a wick sweep of the prior week's
+      // high or low (stop-hunt trap), H4 EMA trend aligns, and M15 Stochastic
+      // confirms the reversal with a cross from extreme.  Ultra-selective:
+      // targets 2–3 trades per calendar week with a fixed pip profit goal.
+      if(outSig.setupType == SETUP_NONE && p.setupFEnabled)
+      {
+         double priorHigh, priorLow, curHigh, curLow;
+         if(GetWeeklyHighLow(symbol, priorHigh, priorLow, curHigh, curLow) &&
+            priorHigh > priorLow)
+         {
+            // Try BUY (prior-week low sweep) then SELL (prior-week high sweep)
+            int    fDir        = STRAT_DIR_NONE;
+            double weeklyLevel = 0.0;
+            double sweepWick   = 0.0;
+
+            // ── BUY candidate ─────────────────────────────────────────────
+            {
+               double sw = 0.0;
+               if(CheckM15WeeklySweep(symbol, STRAT_DIR_BUY, priorLow,
+                                      p.setupFWeeklySweepBuf, sw))
+               {
+                  fDir        = STRAT_DIR_BUY;
+                  weeklyLevel = priorLow;
+                  sweepWick   = sw;
+               }
+            }
+
+            // ── SELL candidate (only if BUY not already confirmed) ────────
+            if(fDir == STRAT_DIR_NONE)
+            {
+               double sw = 0.0;
+               if(CheckM15WeeklySweep(symbol, STRAT_DIR_SELL, priorHigh,
+                                      p.setupFWeeklySweepBuf, sw))
+               {
+                  fDir        = STRAT_DIR_SELL;
+                  weeklyLevel = priorHigh;
+                  sweepWick   = sw;
+               }
+            }
+
+            if(fDir != STRAT_DIR_NONE)
+            {
+               // ── H4 EMA alignment gate ────────────────────────────────
+               // Neutral H4 (bias = 0) is acceptable; only block when trend
+               // is actively against the trade direction.
+               bool h4Ok = true;
+               if(p.setupFRequireH4Align && p.h4EmaFast > 0 && p.h4EmaSlow > 0)
+               {
+                  int  h4b = 0;
+                  bool got = GetH4EMATrend(symbol, p.h4EmaFast, p.h4EmaSlow, h4b);
+                  outSig.h4Bias = h4b;
+                  if(got)
+                     h4Ok = (fDir == STRAT_DIR_BUY  ? h4b >= 0 : h4b <= 0);
+               }
+
+               // ── M15 Stochastic cross confirmation gate ────────────────
+               bool m15Ok = true;
+               if(p.setupFRequireM15Stoch)
+               {
+                  int crossDir = GetM15StochCrossDir(symbol,
+                                                     p.stochKPeriod, p.stochDPeriod,
+                                                     p.stochSlowing,
+                                                     p.stochOversold, p.stochOverbought);
+                  m15Ok = (crossDir == fDir);
+               }
+
+               if(h4Ok && m15Ok)
+               {
+                  outSig.setupType          = SETUP_WEEKLY_PRECISION;
+                  outSig.direction          = fDir;
+                  outSig.wickSweepConfirmed = true;
+                  if(fDir == STRAT_DIR_BUY)
+                  {
+                     outSig.sweepWickLow = sweepWick;
+                     outSig.boxLow       = weeklyLevel;  // weekly level as key reference
+                  }
+                  else
+                  {
+                     outSig.sweepWickHigh = sweepWick;
+                     outSig.boxHigh       = weeklyLevel;
+                  }
+                  outSig.details = StringFormat(
+                     "SETUP F %s | priorWeek=[%.5f,%.5f] sweepLevel=%.5f"
+                     " sweepWick=%.5f h4Bias=%d h4Ok=%s m15StochOk=%s",
+                     fDir == STRAT_DIR_BUY ? "BUY" : "SELL",
+                     priorLow, priorHigh, weeklyLevel, sweepWick,
+                     outSig.h4Bias,
+                     h4Ok ? "Y" : "N", m15Ok ? "Y" : "N");
+               }
+            }
+         }
+      }
+
       // ── No setup found ────────────────────────────────────────────────────
       if(outSig.setupType == SETUP_NONE)
       {
@@ -730,8 +922,6 @@ public:
             adx1M, adxHooking1M ? "Y" : "N", adx5M, stochK, rsiCur);
          return true;
       }
-
-      // ═══════════════════════════════════════════════════════════════════════
       // POST-SIGNAL FILTER GATES
       // Each gate: if the condition fails, reject the signal and return true.
       // The original details string is preserved in the rejection message.
@@ -807,7 +997,7 @@ public:
       }
 
       // ── Gate 3: Dual M5 Stochastic gate ──────────────────────────────────
-      if(p.requireM5StochConfirm)
+      if(p.requireM5StochConfirm && outSig.setupType != SETUP_WEEKLY_PRECISION)
       {
          double m5K = 0.0;
          bool   ok  = GetStochKD_TF(symbol, PERIOD_M5,
@@ -846,7 +1036,7 @@ public:
       }
 
       // ── Gate 5: ATR expansion filter ──────────────────────────────────────
-      if(p.requireATRExpansion && p.atrPeriod > 0)
+      if(p.requireATRExpansion && p.atrPeriod > 0 && outSig.setupType != SETUP_WEEKLY_PRECISION)
       {
          bool expanding = false;
          bool ok        = GetATRExpansion(symbol, p.atrPeriod, expanding);
@@ -896,7 +1086,7 @@ public:
       }
 
       // ── Gate 8: Round-number magnet avoidance ─────────────────────────────
-      if(p.avoidRoundNumbers && p.roundNumRadiusPrice > 0.0)
+      if(p.avoidRoundNumbers && p.roundNumRadiusPrice > 0.0 && outSig.setupType != SETUP_WEEKLY_PRECISION)
       {
          if(IsNearRoundNumber(midPrice, p.roundNumRadiusPrice, isGold))
          {
@@ -910,7 +1100,7 @@ public:
       }
 
       // ── Gate 9: Tick-volume minimum ───────────────────────────────────────
-      if(p.minTickVolume > 0 && outSig.signalBarLow > 0.0)
+      if(p.minTickVolume > 0 && outSig.signalBarLow > 0.0 && outSig.setupType != SETUP_WEEKLY_PRECISION)
       {
          if(CopyRates(symbol, PERIOD_M1, 1, 1, bar1) == 1)
          {
@@ -927,7 +1117,7 @@ public:
       }
 
       // ── Gate 10: Liquidity void (bar range > 3× M1 ATR) ──────────────────
-      if(p.liquidityVoidFilter && p.atrPeriod > 0 && outSig.signalBarLow > 0.0)
+      if(p.liquidityVoidFilter && p.atrPeriod > 0 && outSig.signalBarLow > 0.0 && outSig.setupType != SETUP_WEEKLY_PRECISION)
       {
          if(CopyRates(symbol, PERIOD_M1, 1, 1, bar1) == 1)
          {
