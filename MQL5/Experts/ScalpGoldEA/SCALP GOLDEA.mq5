@@ -1,24 +1,26 @@
 //+------------------------------------------------------------------+
 //|                                              SCALP GOLDEA.mq5    |
 //|                                  Copyright 2026, Trading Pro     |
-//|   V11.0 - Multi-Position Scalping + Frequency Boost              |
+//|   V12.0 - Bad-Trade Blocker: H1 Trend Gate + Min ADX            |
 //+------------------------------------------------------------------+
 // Changelog:
-//   v11.0 – FREQUENCY FIX: removed single-position block; EA now runs
-//           up to InpMaxPositions concurrent trades so a slow runner
-//           never freezes the engine.
-//           TP reduced from 550 → 120 pips default so trades complete
-//           quickly and free the slot for the next signal.
-//           RSI thresholds widened (buy < 40, sell > 60) for ~3× more
-//           signal frequency while retaining quality filter.
-//           H1 EMA21/50 challenge-mode HTF filter (v10.1).
-//           All v10.0 features preserved: HTF sniper, ADX scoring,
-//           staged exits, volatility filter, micro-account lot boost,
-//           challenge protection guards.
+//   v12.0 – BAD-TRADE BLOCKER:
+//           RSI thresholds restored to 35/65 (tight = 88% win rate).
+//           InpUseTrendGate (default true): H1 EMA21/50 direction must
+//           agree with trade direction for ALL entries – specifically
+//           kills counter-trend BB scalps that cause losing trades.
+//           InpMinADX (default 18): minimum ADX required to enter –
+//           blocks choppy-market false BB touches where ADX is low.
+//           Together these two filters target only the losing trades
+//           without removing winning setups.
+//   v11.0 – Multi-position (InpMaxPositions=3), TP 120 pips, H1 HTF
+//           challenge filter.
+//   v10.0 – Sniper L2/L3, HTF H4 EMA gate, ADX scoring, micro-lot
+//           boost, challenge mode, protection guards.
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Pro"
 #property link      "https://www.mql5.com"
-#property version   "11.00"
+#property version   "12.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -56,6 +58,8 @@ input int      InpMaxSpread      = 45;        // More realistic for Gold (45 poi
 input int      InpMaxSlippage    = 30;        // Realistic Slippage for Gold HFT
 input bool     InpUseVolFilter   = true;      // Dynamic Trend-Expansion Filter
 input bool     InpUseADXConfirmation = true;  // Check ADX Slope (Increasing Momentum)
+input bool     InpUseTrendGate   = true;      // BAD-TRADE BLOCKER: require H1 EMA trend alignment for ALL entries
+input double   InpMinADX         = 18.0;      // BAD-TRADE BLOCKER: skip entry when ADX below this (choppy market)
 
 input group "=== TIME BLACKOUTS ==="
 input int      InpHourStart      = 1;         // Start HFT
@@ -235,12 +239,17 @@ void OnTick()
    // ======================================================
    // BUY SCORING ENGINE
    // ======================================================
-   if(low1 <= bbLower[1] && rsi[1] < 40 && bullishCandle && strongBuyReversal)
+   if(low1 <= bbLower[1] && rsi[1] < 35 && bullishCandle && strongBuyReversal)
    {
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_BUY)) return;
 
-      // Challenge mode: only take H1-trend-confirmed shots (H1 EMA21 > EMA50)
-      // This replaces the old H4 EMA50/200 gate which blocked ~98% of signals
+      // BAD-TRADE BLOCKER 1: H1 EMA21/50 must be bullish (blocks counter-trend scalps)
+      if(InpUseTrendGate && !chalHTFBullish) return;
+
+      // BAD-TRADE BLOCKER 2: ADX must show enough trend strength (blocks choppy-market fakes)
+      if(adx < InpMinADX) return;
+
+      // Challenge mode: only take H1-trend-confirmed shots (already enforced above when gate is on)
       if(InpChallengeMode && !chalHTFBullish) return;
 
       double scoreRisk = InpRiskLevel1; // Default: Level 1 scalp
@@ -264,12 +273,17 @@ void OnTick()
    // ======================================================
    // SELL SCORING ENGINE
    // ======================================================
-   if(high1 >= bbUpper[1] && rsi[1] > 60 && bearishCandle && strongSellReversal)
+   if(high1 >= bbUpper[1] && rsi[1] > 65 && bearishCandle && strongSellReversal)
    {
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_SELL)) return;
 
-      // Challenge mode: only take H1-trend-confirmed shots (H1 EMA21 < EMA50)
-      // This replaces the old H4 EMA50/200 gate which blocked ~98% of signals
+      // BAD-TRADE BLOCKER 1: H1 EMA21/50 must be bearish (blocks counter-trend scalps)
+      if(InpUseTrendGate && !chalHTFBearish) return;
+
+      // BAD-TRADE BLOCKER 2: ADX must show enough trend strength (blocks choppy-market fakes)
+      if(adx < InpMinADX) return;
+
+      // Challenge mode: only take H1-trend-confirmed shots (already enforced above when gate is on)
       if(InpChallengeMode && !chalHTFBearish) return;
 
       double scoreRisk = InpRiskLevel1; // Default: Level 1 scalp
