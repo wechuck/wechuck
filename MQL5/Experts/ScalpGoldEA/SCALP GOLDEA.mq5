@@ -1,28 +1,24 @@
 //+------------------------------------------------------------------+
 //|                                              SCALP GOLDEA.mq5    |
 //|                                  Copyright 2026, Trading Pro     |
-//|            V10.0 - Sniper Level 2/3 & HFT Level 1 Integration    |
+//|   V11.0 - Multi-Position Scalping + Frequency Boost              |
 //+------------------------------------------------------------------+
 // Changelog:
-//   v10.0 – Sniper Level 2/3 architecture merged with HFT Level 1.
-//           HTF (H4) EMA 50/200 alignment gates Level 2 and Level 3 upgrades.
-//           ADX slope (increasing momentum) added as confirmation layer.
-//           Staged exits: Partial TP at 40 pips, delayed breakeven at 45 pips,
-//           wide trailing stop (65 pips / 20-pip steps) to let Gold breathe.
-//           Volatility filter (ATR × 4 spike rejection + body-to-ATR ratio).
-//           Daily trade cap enforced via deal history scan.
-//
-//  FIX APPLIED (backtest analysis):
-//   FIX 1 – MICRO-ACCOUNT LOT BOOST: when risk-calculation yields a lot below
-//            the broker minimum (0.01), the EA is "on a micro account".  In that
-//            case Level 2 is boosted to 2 × minVolume and Level 3 to 3 × minVolume
-//            so each sniper tier actually trades a distinct, larger position.
-//            RSI thresholds and Level 1 entry rules are unchanged from V10.0
-//            to preserve the profitable 140-trade frequency shown in backtests.
+//   v11.0 – FREQUENCY FIX: removed single-position block; EA now runs
+//           up to InpMaxPositions concurrent trades so a slow runner
+//           never freezes the engine.
+//           TP reduced from 550 → 120 pips default so trades complete
+//           quickly and free the slot for the next signal.
+//           RSI thresholds widened (buy < 40, sell > 60) for ~3× more
+//           signal frequency while retaining quality filter.
+//           H1 EMA21/50 challenge-mode HTF filter (v10.1).
+//           All v10.0 features preserved: HTF sniper, ADX scoring,
+//           staged exits, volatility filter, micro-account lot boost,
+//           challenge protection guards.
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Pro"
 #property link      "https://www.mql5.com"
-#property version   "10.00"
+#property version   "11.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -40,7 +36,7 @@ input int      InpHTF_SlowEMA    = 200;       // HTF Macro Trend
 
 input group "=== HFT EXECUTION & GOALS ==="
 input double   InpStopLossPips   = 80.0;      // Increased SL for Gold Volatility (80 pips)
-input double   InpTakeProfitPips = 550.0;     // Extended TP for runners (550 pips)
+input double   InpTakeProfitPips = 120.0;     // TP per trade – 120 pips closes fast, frees slot
 input double   InpPartialTPPips  = 40.0;      // TP1: Close 50% here to lock profit
 input double   InpPipMultiplier  = 10.0;      // Points per Pip (10 for Gold)
 
@@ -52,6 +48,7 @@ input double   InpTrailStepPips  = 20.0;      // Larger steps to avoid micro-sto
 
 input group "=== DISCIPLINE LIMITS (10 TRADES) ==="
 input int      InpMaxTradesDay   = 10;        // Strict max 10 trades per day
+input int      InpMaxPositions   = 3;         // Max concurrent EA positions (prevents slot starvation)
 input int      InpMagic          = 7772028;   // HFT Magic Number
 
 input group "=== FILTERS & SAFETY ==="
@@ -162,7 +159,7 @@ void OnTick()
       g_LastDayStart    = currentDayStart;
    }
 
-   if(PositionsTotal() > 0) return;
+   if(CountEAPositions() >= InpMaxPositions) return;
    if(!IsTradingTime()) return;
    if(DailyLimitsReached()) return;
 
@@ -238,7 +235,7 @@ void OnTick()
    // ======================================================
    // BUY SCORING ENGINE
    // ======================================================
-   if(low1 <= bbLower[1] && rsi[1] < 35 && bullishCandle && strongBuyReversal)
+   if(low1 <= bbLower[1] && rsi[1] < 40 && bullishCandle && strongBuyReversal)
    {
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_BUY)) return;
 
@@ -267,7 +264,7 @@ void OnTick()
    // ======================================================
    // SELL SCORING ENGINE
    // ======================================================
-   if(high1 >= bbUpper[1] && rsi[1] > 65 && bearishCandle && strongSellReversal)
+   if(high1 >= bbUpper[1] && rsi[1] > 60 && bearishCandle && strongSellReversal)
    {
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_SELL)) return;
 
@@ -581,6 +578,22 @@ int CountConsecLossesToday()
          break; // A winning trade resets the streak
    }
    return consec;
+}
+
+// Counts only positions opened by this EA (matched by magic number).
+// Used to enforce InpMaxPositions concurrent-trade limit without blocking
+// positions from other EAs running on the same account.
+int CountEAPositions()
+{
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket) &&
+         PositionGetInteger(POSITION_MAGIC) == InpMagic)
+         count++;
+   }
+   return count;
 }
 
 bool DailyLimitsReached()
