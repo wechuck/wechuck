@@ -73,15 +73,19 @@ input double   InpChallengeTP_Late    = 20.0;  // TP when balance >= threshold (
 input double   InpChallengeThreshold  = 300.0; // Balance threshold: switch from Early to Late TP ($)
 
 input group "=== CHALLENGE PROTECTION (SMOOTH EQUITY CURVE) ==="
-input double   InpChallengeDailyDDPct     = 15.0; // Stop if daily drawdown hits this % – no more entries today
-input int      InpChallengeMaxConsecLoss  = 2;     // Pause after N consecutive losses in one day
-input double   InpChallengeDailyProfitPct = 50.0;  // Stop after gaining this % in one day – lock the profit
-input double   InpChallengeBETrigger      = 25.0;  // Move to breakeven after X pips (faster than normal 45)
+input double          InpChallengeDailyDDPct     = 15.0;       // Stop if daily drawdown hits this % – no more entries today
+input int             InpChallengeMaxConsecLoss  = 2;          // Pause after N consecutive losses in one day
+input double          InpChallengeDailyProfitPct = 50.0;       // Stop after gaining this % in one day – lock the profit
+input double          InpChallengeBETrigger      = 25.0;       // Move to breakeven after X pips (faster than normal 45)
+input ENUM_TIMEFRAMES InpChallengeHTF            = PERIOD_H1;  // Challenge entry filter TF (H1 = ~15× more signals than H4)
+input int             InpChallengeHTF_FastEMA    = 21;         // Challenge HTF fast EMA period
+input int             InpChallengeHTF_SlowEMA    = 50;         // Challenge HTF slow EMA period
 
 //--- GLOBALS
 CTrade trade;
 int handleBB, handleRSI, handleADX, handleATR;
 int handleHTF_Fast, handleHTF_Slow;
+int handleChalHTF_Fast, handleChalHTF_Slow;   // Challenge-mode H1 EMA filter
 double stepVolume, minVolume, maxVolume;
 
 // Challenge mode daily tracking
@@ -115,9 +119,14 @@ int OnInit()
    handleHTF_Fast = iMA(_Symbol, InpHTF, InpHTF_FastEMA, 0, MODE_EMA, PRICE_CLOSE);
    handleHTF_Slow = iMA(_Symbol, InpHTF, InpHTF_SlowEMA, 0, MODE_EMA, PRICE_CLOSE);
 
+   // Challenge mode uses a faster HTF (H1 EMA21/50) so more signals fire
+   handleChalHTF_Fast = iMA(_Symbol, InpChallengeHTF, InpChallengeHTF_FastEMA, 0, MODE_EMA, PRICE_CLOSE);
+   handleChalHTF_Slow = iMA(_Symbol, InpChallengeHTF, InpChallengeHTF_SlowEMA, 0, MODE_EMA, PRICE_CLOSE);
+
    if(handleBB == INVALID_HANDLE || handleRSI == INVALID_HANDLE ||
       handleADX == INVALID_HANDLE || handleATR == INVALID_HANDLE ||
-      handleHTF_Fast == INVALID_HANDLE || handleHTF_Slow == INVALID_HANDLE)
+      handleHTF_Fast == INVALID_HANDLE || handleHTF_Slow == INVALID_HANDLE ||
+      handleChalHTF_Fast == INVALID_HANDLE || handleChalHTF_Slow == INVALID_HANDLE)
    {
       Print("Indicator Failed To Load!");
       return(INIT_FAILED);
@@ -134,6 +143,8 @@ void OnDeinit(const int reason)
    IndicatorRelease(handleATR);
    IndicatorRelease(handleHTF_Fast);
    IndicatorRelease(handleHTF_Slow);
+   IndicatorRelease(handleChalHTF_Fast);
+   IndicatorRelease(handleChalHTF_Slow);
 }
 
 //+------------------------------------------------------------------+
@@ -170,9 +181,13 @@ void OnTick()
    ArraySetAsSeries(rsi, true);     ArraySetAsSeries(adxMain, true);
    ArraySetAsSeries(adxPlus, true); ArraySetAsSeries(adxMinus, true);
 
-   // HTF Indicators
+   // HTF Indicators (normal sniper mode)
    double htfFast[], htfSlow[];
    ArraySetAsSeries(htfFast, true); ArraySetAsSeries(htfSlow, true);
+
+   // Challenge mode faster HTF (H1 EMA21/50)
+   double chalHTFFast[], chalHTFSlow[];
+   ArraySetAsSeries(chalHTFFast, true); ArraySetAsSeries(chalHTFSlow, true);
 
    if(CopyBuffer(handleBB, 1, 0, 3, bbUpper) < 3) return;
    if(CopyBuffer(handleBB, 2, 0, 3, bbLower) < 3) return;
@@ -182,6 +197,8 @@ void OnTick()
    if(CopyBuffer(handleADX, 2, 0, 3, adxMinus) < 3) return;
    if(CopyBuffer(handleHTF_Fast, 0, 0, 2, htfFast) < 2) return;
    if(CopyBuffer(handleHTF_Slow, 0, 0, 2, htfSlow) < 2) return;
+   if(CopyBuffer(handleChalHTF_Fast, 0, 0, 2, chalHTFFast) < 2) return;
+   if(CopyBuffer(handleChalHTF_Slow, 0, 0, 2, chalHTFSlow) < 2) return;
 
    // Base ADX & Trend
    double adx     = adxMain[1];
@@ -193,9 +210,13 @@ void OnTick()
    bool bearishTrend = (minus > plus);
    bool adxRising    = (adx > adxPrev);
 
-   // HTF (Sniper) Alignment
+   // HTF (Sniper) Alignment – H4 EMA50/200 for normal mode
    bool htfBullish = (htfFast[1] > htfSlow[1]);
    bool htfBearish = (htfFast[1] < htfSlow[1]);
+
+   // Challenge HTF Alignment – H1 EMA21/50 (much more responsive, fires ~15× more)
+   bool chalHTFBullish = (chalHTFFast[1] > chalHTFSlow[1]);
+   bool chalHTFBearish = (chalHTFFast[1] < chalHTFSlow[1]);
 
    // Candle structure
    double close1 = iClose(_Symbol, _Period, 1);
@@ -221,8 +242,9 @@ void OnTick()
    {
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_BUY)) return;
 
-      // In challenge mode only take HTF-confirmed sniper shots – no bare Level-1 scalps
-      if(InpChallengeMode && !(bullishTrend && htfBullish)) return;
+      // Challenge mode: only take H1-trend-confirmed shots (H1 EMA21 > EMA50)
+      // This replaces the old H4 EMA50/200 gate which blocked ~98% of signals
+      if(InpChallengeMode && !chalHTFBullish) return;
 
       double scoreRisk = InpRiskLevel1; // Default: Level 1 scalp
 
@@ -249,8 +271,9 @@ void OnTick()
    {
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_SELL)) return;
 
-      // In challenge mode only take HTF-confirmed sniper shots – no bare Level-1 scalps
-      if(InpChallengeMode && !(bearishTrend && htfBearish)) return;
+      // Challenge mode: only take H1-trend-confirmed shots (H1 EMA21 < EMA50)
+      // This replaces the old H4 EMA50/200 gate which blocked ~98% of signals
+      if(InpChallengeMode && !chalHTFBearish) return;
 
       double scoreRisk = InpRiskLevel1; // Default: Level 1 scalp
 
