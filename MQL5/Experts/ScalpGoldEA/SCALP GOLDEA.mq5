@@ -1,9 +1,25 @@
 //+------------------------------------------------------------------+
 //|                                              SCALP GOLDEA.mq5    |
 //|                                  Copyright 2026, Trading Pro     |
-//|   V13.0 - Precision Timing Engine (built on V10.0)               |
+//|   V14.0 - L2/L3 Survival Mode (built on V13.0)                   |
 //+------------------------------------------------------------------+
 // Changelog:
+//   v14.0 – L2/L3 SURVIVAL MODE layered on top of V13.0.
+//           Level 1 frequency and all V13.0 precision-timing logic
+//           are completely unchanged.  L2 and L3 are transformed into
+//           ultra-selective "institutional sniper executions":
+//           WEEKLY CAP: max InpL23WeeklyCap combined L2+L3 per week.
+//           DAILY CAP:  max InpL23DailyCap combined L2+L3 per day.
+//           L3 COOLDOWN: InpL3CooldownHours rest between L3 trades.
+//           LOSS COOLDOWN: any L2/L3 SL hit freezes L2/L3 for
+//             InpL23LossCooldownH hours; Level 1 remains active.
+//           ADX QUALITY GATE: L2/L3 only when ADX ≥ InpSniperADXStrong
+//             AND rising AND no recent spike from low volatility.
+//           WICK FILTER: entry candle with rejection wick > threshold
+//             blocks L2/L3 (trade still fires at Level 1 risk).
+//           DEMOTE-NOT-DISCARD: if any survival gate blocks L2/L3,
+//             the trade is demoted to Level 1 – no trades are lost.
+//
 //   v13.0 – PRECISION TIMING ENGINE layered on top of V10.0.
 //           All V10.0 features preserved unchanged (BB/RSI/ADX/ATR,
 //           H4 HTF sniper scoring L1/L2/L3, partial TP, BE, trail,
@@ -34,7 +50,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Pro"
 #property link      "https://www.mql5.com"
-#property version   "13.00"
+#property version   "14.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -90,6 +106,16 @@ input int    InpPendingExpireBars  = 5;    // Bars before a delayed signal expir
 input double InpLargeBodyMult     = 2.0;  // Body > N×ATR: wait for pullback before entry
 input bool   InpEnableReentry     = true; // Allow one re-entry attempt after SL hit
 
+input group "=== L2/L3 SURVIVAL MODE (V14) ==="
+input int    InpL23WeeklyCap       = 3;    // Max combined L2+L3 trades per week
+input int    InpL23DailyCap        = 1;    // Max combined L2+L3 trades per day
+input int    InpL3CooldownHours    = 48;   // Min hours between consecutive L3 trades
+input int    InpL23LossCooldownH   = 72;   // Hours L2/L3 frozen after any L2/L3 loss
+input double InpSniperADXStrong    = 28.0; // ADX must exceed this for any L2/L3 entry
+input int    InpSniperADXSpikeBars = 5;    // Look-back bars for fake-breakout ADX spike
+input double InpSniperADXSpikeMin  = 16.0; // If ADX was below this N bars ago → suspect spike
+input double InpSniperMaxWickRatio = 0.45; // Max wick/range ratio on entry candle (L2/L3 only)
+
 //--- GLOBALS
 CTrade trade;
 int handleBB, handleRSI, handleADX, handleATR;
@@ -107,6 +133,10 @@ bool     g_ReentryArmed   = false;
 int      g_ReentryDir     = 0;     // 1=BUY, -1=SELL
 datetime g_ReentryExpiry  = 0;
 int      g_LastPosCount   = 0;
+
+// L2/L3 Survival Mode state
+datetime g_L3LastTime          = 0; // Time of last executed L3 trade (for cooldown)
+datetime g_L23LossCooldownEnd  = 0; // L2/L3 blocked until this datetime after a loss
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -148,6 +178,10 @@ int OnInit()
    g_ReentryDir    = 0;
    g_ReentryExpiry = 0;
    g_LastPosCount  = 0;
+
+   // Reset L2/L3 survival state
+   g_L3LastTime         = 0;
+   g_L23LossCooldownEnd = 0;
 
    return(INIT_SUCCEEDED);
 }
@@ -265,6 +299,11 @@ void OnTick()
          else if(score == 2) scoreRisk = InpRiskLevel2; // High Probability Sniper
       }
 
+      // V14 SURVIVAL MODE: L2/L3 gated through ultra-selective sniper filter.
+      // If any survival condition is not met, demote to L1 – trade still fires.
+      if(scoreRisk >= InpRiskLevel2 && !IsL23SniperAllowed(ORDER_TYPE_BUY, scoreRisk))
+         scoreRisk = InpRiskLevel1;
+
       // Precision gates: store pending instead of hard reject
       if(spread > InpMaxSpread)                                { StorePending(1, scoreRisk); return; }
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_BUY)) { StorePending(1, scoreRisk); return; }
@@ -295,6 +334,11 @@ void OnTick()
          if(score == 3)      scoreRisk = InpRiskLevel3; // God Tier
          else if(score == 2) scoreRisk = InpRiskLevel2; // High Probability Sniper
       }
+
+      // V14 SURVIVAL MODE: L2/L3 gated through ultra-selective sniper filter.
+      // If any survival condition is not met, demote to L1 – trade still fires.
+      if(scoreRisk >= InpRiskLevel2 && !IsL23SniperAllowed(ORDER_TYPE_SELL, scoreRisk))
+         scoreRisk = InpRiskLevel1;
 
       // Precision gates: store pending instead of hard reject
       if(spread > InpMaxSpread)                                 { StorePending(-1, scoreRisk); return; }
@@ -391,6 +435,10 @@ void ExecuteHFTOrder(ENUM_ORDER_TYPE type, double price, double slPoints, double
       comment = "V10_SniperL2";
    else
       comment = "V10_ScalpL1";
+
+   // V14 – record L3 activation time for inter-trade cooling enforcement
+   if(assignedRisk >= InpRiskLevel3)
+      g_L3LastTime = TimeCurrent();
 
    if(type == ORDER_TYPE_BUY)
    {
@@ -691,6 +739,21 @@ void CheckReentryArm()
          g_ReentryDir    = (lastType == DEAL_TYPE_SELL) ? 1 : -1;
          g_ReentryArmed  = true;
          g_ReentryExpiry = TimeCurrent() + 6 * PeriodSeconds(_Period);
+
+         // V14 – if the stopped-out position was L2/L3, activate survival cooldown.
+         // The SL exit deal won't carry the original comment; find the matching IN deal.
+         long posId = HistoryDealGetInteger(lastTicket, DEAL_POSITION_ID);
+         HistorySelect(TimeCurrent() - 7 * 86400, TimeCurrent()); // wider window for IN deal
+         for(int j = 0; j < HistoryDealsTotal(); j++)
+         {
+            ulong dj = HistoryDealGetTicket(j);
+            if(HistoryDealGetInteger(dj, DEAL_POSITION_ID) != posId)     continue;
+            if(HistoryDealGetInteger(dj, DEAL_ENTRY)       != DEAL_ENTRY_IN) continue;
+            string cmt = HistoryDealGetString(dj, DEAL_COMMENT);
+            if(StringFind(cmt, "SniperL2") >= 0 || StringFind(cmt, "SniperL3") >= 0)
+               g_L23LossCooldownEnd = TimeCurrent() + (long)InpL23LossCooldownH * 3600;
+            break;
+         }
       }
    }
    g_LastPosCount = curCount;
@@ -754,4 +817,101 @@ bool TryReentry(double Ask, double Bid)
       return true;
    }
    return false;
+}
+
+//+------------------------------------------------------------------+
+//| L2/L3 SURVIVAL MODE – Helper Functions (V14)                     |
+//+------------------------------------------------------------------+
+
+// True when ADX recently spiked from a low-volatility base (fake breakout risk)
+bool IsADXSpikeFromLow()
+{
+   int needed = InpSniperADXSpikeBars + 2;
+   double adxHist[];
+   ArraySetAsSeries(adxHist, true);
+   if(CopyBuffer(handleADX, 0, 0, needed, adxHist) < needed) return false;
+   // Check bars [2 .. InpSniperADXSpikeBars+1] (N bars before the last closed bar)
+   for(int i = 2; i <= InpSniperADXSpikeBars + 1; i++)
+   {
+      if(adxHist[i] < InpSniperADXSpikeMin) return true; // ADX was low → current rise is a spike
+   }
+   return false;
+}
+
+// True when entry candle has acceptable wick structure (no rejection wick against entry direction)
+bool HasCleanSniperCandle(ENUM_ORDER_TYPE type)
+{
+   double high1  = iHigh(_Symbol, _Period, 1);
+   double low1   = iLow(_Symbol, _Period, 1);
+   double open1  = iOpen(_Symbol, _Period, 1);
+   double close1 = iClose(_Symbol, _Period, 1);
+   double range  = high1 - low1;
+   if(range < _Point * 10) return true;  // negligible range – no concern
+
+   double upperWick = high1 - MathMax(open1, close1);
+   double lowerWick = MathMin(open1, close1) - low1;
+
+   // BUY: reject if upper wick is dominant (rally was sold into – rejection of upside)
+   if(type == ORDER_TYPE_BUY  && upperWick / range > InpSniperMaxWickRatio) return false;
+   // SELL: reject if lower wick is dominant (drop was bought into – rejection of downside)
+   if(type == ORDER_TYPE_SELL && lowerWick / range > InpSniperMaxWickRatio) return false;
+
+   return true;
+}
+
+// Count L2/L3 entry deals (by comment) executed since a given start time
+int CountL23TradesInPeriod(datetime from)
+{
+   HistorySelect(from, TimeCurrent());
+   int count = 0;
+   for(int i = 0; i < HistoryDealsTotal(); i++)
+   {
+      ulong dk = HistoryDealGetTicket(i);
+      if(HistoryDealGetInteger(dk, DEAL_MAGIC) != InpMagic)      continue;
+      if(HistoryDealGetInteger(dk, DEAL_ENTRY) != DEAL_ENTRY_IN) continue;
+      string cmt = HistoryDealGetString(dk, DEAL_COMMENT);
+      if(StringFind(cmt, "SniperL2") >= 0 || StringFind(cmt, "SniperL3") >= 0)
+         count++;
+   }
+   return count;
+}
+
+// Master gate: returns true only when ALL L2/L3 survival conditions are satisfied.
+// When false the caller demotes the trade to Level 1 – no trade is ever discarded.
+bool IsL23SniperAllowed(ENUM_ORDER_TYPE type, double scoreRisk)
+{
+   // 1. Loss cooldown: L2/L3 frozen after any L2/L3 SL hit
+   if(g_L23LossCooldownEnd > 0 && TimeCurrent() < g_L23LossCooldownEnd)
+      return false;
+
+   // 2. L3 inter-trade cooldown: enforce rest period between consecutive L3 trades
+   if(scoreRisk >= InpRiskLevel3 && g_L3LastTime > 0 &&
+      TimeCurrent() < g_L3LastTime + (long)InpL3CooldownHours * 3600)
+      return false;
+
+   // 3. Weekly L2/L3 cap (combined)
+   MqlDateTime dtNow;
+   TimeToStruct(TimeCurrent(), dtNow);
+   int daysToMon  = (dtNow.day_of_week == 0) ? 6 : (dtNow.day_of_week - 1);
+   datetime weekStart = iTime(_Symbol, PERIOD_D1, 0) - (long)daysToMon * 86400;
+   if(CountL23TradesInPeriod(weekStart) >= InpL23WeeklyCap)
+      return false;
+
+   // 4. Daily L2/L3 cap
+   datetime todayStart = iTime(_Symbol, PERIOD_D1, 0);
+   if(CountL23TradesInPeriod(todayStart) >= InpL23DailyCap)
+      return false;
+
+   // 5. ADX quality gate: strong trend, rising, no fake spike from low volatility
+   double adxArr[];
+   ArraySetAsSeries(adxArr, true);
+   if(CopyBuffer(handleADX, 0, 0, 3, adxArr) < 3) return false;
+   if(adxArr[1] < InpSniperADXStrong) return false;  // market not trending strongly enough
+   if(adxArr[1] <= adxArr[2])         return false;  // ADX must be rising (growing momentum)
+   if(IsADXSpikeFromLow())            return false;  // spike from low vol = fake breakout risk
+
+   // 6. Candle quality: no rejection wick against entry direction
+   if(!HasCleanSniperCandle(type)) return false;
+
+   return true;
 }
