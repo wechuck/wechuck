@@ -72,11 +72,21 @@ input double   InpChallengeTP_Early   = 500.0; // TP when balance < threshold (p
 input double   InpChallengeTP_Late    = 20.0;  // TP when balance >= threshold (pips)
 input double   InpChallengeThreshold  = 300.0; // Balance threshold: switch from Early to Late TP ($)
 
+input group "=== CHALLENGE PROTECTION (SMOOTH EQUITY CURVE) ==="
+input double   InpChallengeDailyDDPct     = 15.0; // Stop if daily drawdown hits this % – no more entries today
+input int      InpChallengeMaxConsecLoss  = 2;     // Pause after N consecutive losses in one day
+input double   InpChallengeDailyProfitPct = 50.0;  // Stop after gaining this % in one day – lock the profit
+input double   InpChallengeBETrigger      = 25.0;  // Move to breakeven after X pips (faster than normal 45)
+
 //--- GLOBALS
 CTrade trade;
 int handleBB, handleRSI, handleADX, handleATR;
 int handleHTF_Fast, handleHTF_Slow;
 double stepVolume, minVolume, maxVolume;
+
+// Challenge mode daily tracking
+double   g_DayStartBalance = 0.0;
+datetime g_LastDayStart    = 0;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -90,6 +100,10 @@ int OnInit()
    stepVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    minVolume  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    maxVolume  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+
+   // Initialise daily tracking for challenge protection
+   g_DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   g_LastDayStart    = iTime(_Symbol, PERIOD_D1, 0);
 
    // Base Timeframe Indicators
    handleBB  = iBands(_Symbol, _Period, 20, 0, 2.0, PRICE_CLOSE);
@@ -129,9 +143,20 @@ void OnTick()
 {
    ManageHFTExits();
 
+   // Reset daily balance snapshot at the start of each new trading day
+   datetime currentDayStart = iTime(_Symbol, PERIOD_D1, 0);
+   if(currentDayStart != g_LastDayStart)
+   {
+      g_DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      g_LastDayStart    = currentDayStart;
+   }
+
    if(PositionsTotal() > 0) return;
    if(!IsTradingTime()) return;
    if(DailyLimitsReached()) return;
+
+   // Challenge mode equity-curve guards – block new entries if any limit is hit
+   if(InpChallengeMode && ChallengeProtectionTriggered()) return;
 
    double Ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double Bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -196,6 +221,9 @@ void OnTick()
    {
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_BUY)) return;
 
+      // In challenge mode only take HTF-confirmed sniper shots – no bare Level-1 scalps
+      if(InpChallengeMode && !(bullishTrend && htfBullish)) return;
+
       double scoreRisk = InpRiskLevel1; // Default: Level 1 scalp
 
       // SNIPER UPGRADE: Level 2/3 only when 4-Hour trend aligns perfectly
@@ -220,6 +248,9 @@ void OnTick()
    if(high1 >= bbUpper[1] && rsi[1] > 65 && bearishCandle && strongSellReversal)
    {
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_SELL)) return;
+
+      // In challenge mode only take HTF-confirmed sniper shots – no bare Level-1 scalps
+      if(InpChallengeMode && !(bearishTrend && htfBearish)) return;
 
       double scoreRisk = InpRiskLevel1; // Default: Level 1 scalp
 
@@ -346,7 +377,8 @@ void ManageHFTExits()
    double Bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
    double partialTPDist = InpPartialTPPips  * InpPipMultiplier * _Point;
-   double beTriggerDist = InpBETriggerPips  * InpPipMultiplier * _Point;
+   double activeBETrigger = InpChallengeMode ? InpChallengeBETrigger : InpBETriggerPips;
+   double beTriggerDist = activeBETrigger   * InpPipMultiplier * _Point;
    double beLockDist    = InpBELockPips     * InpPipMultiplier * _Point;
    double trailDist     = InpTrailDistPips  * InpPipMultiplier * _Point;
    double trailStep     = InpTrailStepPips  * InpPipMultiplier * _Point;
@@ -454,6 +486,80 @@ bool IsVolatilitySafe(ENUM_ORDER_TYPE type)
 //+------------------------------------------------------------------+
 //| UTILITIES                                                        |
 //+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Challenge Protection: four guards for a smooth upward equity     |
+//| curve – daily drawdown brake, consecutive-loss cool-down,        |
+//| daily profit lock, and (via ManageHFTExits) faster breakeven.    |
+//+------------------------------------------------------------------+
+bool ChallengeProtectionTriggered()
+{
+   if(g_DayStartBalance <= 0) return false;
+
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   // 1. Daily drawdown circuit breaker ──────────────────────────────
+   // If today's floating loss drags equity below the day-start
+   // balance by more than InpChallengeDailyDDPct, stop for the day.
+   double dailyDD = (g_DayStartBalance - equity) / g_DayStartBalance * 100.0;
+   if(dailyDD >= InpChallengeDailyDDPct)
+   {
+      Print("CHALLENGE GUARD: Daily DD ", DoubleToString(dailyDD, 1),
+            "% reached. No new entries today.");
+      return true;
+   }
+
+   // 2. Daily profit target lock ─────────────────────────────────────
+   // Once balance has grown by InpChallengeDailyProfitPct today,
+   // stop opening new trades to protect that compounded gain.
+   double dailyGain = (balance - g_DayStartBalance) / g_DayStartBalance * 100.0;
+   if(dailyGain >= InpChallengeDailyProfitPct)
+   {
+      Print("CHALLENGE GUARD: Daily profit target ", DoubleToString(dailyGain, 1),
+            "% hit. Protecting gains.");
+      return true;
+   }
+
+   // 3. Consecutive-loss cool-down ───────────────────────────────────
+   // After InpChallengeMaxConsecLoss losses in a row today,
+   // wait until tomorrow before taking another trade.
+   if(CountConsecLossesToday() >= InpChallengeMaxConsecLoss)
+   {
+      Print("CHALLENGE GUARD: ", InpChallengeMaxConsecLoss,
+            " consecutive losses. Cooling down until tomorrow.");
+      return true;
+   }
+
+   return false;
+}
+
+// Returns how many consecutive losing trades have closed today
+// (scans newest-to-oldest; stops counting the moment a winner is found).
+int CountConsecLossesToday()
+{
+   datetime todayStart = iTime(_Symbol, PERIOD_D1, 0);
+   HistorySelect(todayStart, TimeCurrent());
+
+   int consec = 0;
+   int total  = HistoryDealsTotal();
+   for(int i = total - 1; i >= 0; i--)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagic)       continue;
+
+      double pnl = HistoryDealGetDouble(ticket, DEAL_PROFIT)
+                 + HistoryDealGetDouble(ticket, DEAL_SWAP)
+                 + HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+      if(pnl < 0)
+         consec++;
+      else
+         break; // A winning trade resets the streak
+   }
+   return consec;
+}
+
 bool DailyLimitsReached()
 {
    datetime todayStart = iTime(_Symbol, PERIOD_D1, 0);
