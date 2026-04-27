@@ -12,21 +12,13 @@
 //           Volatility filter (ATR × 4 spike rejection + body-to-ATR ratio).
 //           Daily trade cap enforced via deal history scan.
 //
-//  FIXES APPLIED (backtest analysis):
+//  FIX APPLIED (backtest analysis):
 //   FIX 1 – MICRO-ACCOUNT LOT BOOST: when risk-calculation yields a lot below
 //            the broker minimum (0.01), the EA is "on a micro account".  In that
 //            case Level 2 is boosted to 2 × minVolume and Level 3 to 3 × minVolume
 //            so each sniper tier actually trades a distinct, larger position.
-//
-//   FIX 2 – TIGHTER RSI THRESHOLDS: changed from 35 / 65 to 30 / 70 to avoid
-//            entering too early during strong trend pushes, reducing the number
-//            of stop-loss hits that drag down the risk-to-reward ratio.
-//
-//   FIX 3 – LEVEL 1 BASELINE TREND FILTER: a 200-period EMA on the current
-//            timeframe is now required to align with every Level 1 scalp.
-//            BUY signals are skipped when price is below the EMA; SELL signals
-//            are skipped when price is above it.  Level 2 and Level 3 are exempt
-//            because they already require strict 4-Hour HTF alignment.
+//            RSI thresholds and Level 1 entry rules are unchanged from V10.0
+//            to preserve the profitable 140-trade frequency shown in backtests.
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Pro"
 #property link      "https://www.mql5.com"
@@ -45,10 +37,6 @@ input group "=== SNIPER HTF FILTER (FOR LEVEL 2/3) ==="
 input ENUM_TIMEFRAMES InpHTF     = PERIOD_H4; // Higher Timeframe for 100% setup
 input int      InpHTF_FastEMA    = 50;        // HTF Fast Trend
 input int      InpHTF_SlowEMA    = 200;       // HTF Macro Trend
-
-// FIX 3 – Level 1 baseline trend filter (current timeframe)
-input group "=== LEVEL 1 BASELINE TREND FILTER ==="
-input int      InpBaseEMAPeriod  = 200;       // EMA period on current TF (Level 1 filter)
 
 input group "=== HFT EXECUTION & GOALS ==="
 input double   InpStopLossPips   = 80.0;      // Increased SL for Gold Volatility (80 pips)
@@ -80,7 +68,6 @@ input int      InpHourEnd        = 22;        // Pause before Asian consolidatio
 CTrade trade;
 int handleBB, handleRSI, handleADX, handleATR;
 int handleHTF_Fast, handleHTF_Slow;
-int handleEMA200;                             // FIX 3 – current-TF 200 EMA handle
 double stepVolume, minVolume, maxVolume;
 
 //+------------------------------------------------------------------+
@@ -106,13 +93,9 @@ int OnInit()
    handleHTF_Fast = iMA(_Symbol, InpHTF, InpHTF_FastEMA, 0, MODE_EMA, PRICE_CLOSE);
    handleHTF_Slow = iMA(_Symbol, InpHTF, InpHTF_SlowEMA, 0, MODE_EMA, PRICE_CLOSE);
 
-   // FIX 3 – 200 EMA on the current timeframe for the Level 1 baseline trend filter
-   handleEMA200 = iMA(_Symbol, _Period, InpBaseEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
-
    if(handleBB == INVALID_HANDLE || handleRSI == INVALID_HANDLE ||
       handleADX == INVALID_HANDLE || handleATR == INVALID_HANDLE ||
-      handleHTF_Fast == INVALID_HANDLE || handleHTF_Slow == INVALID_HANDLE ||
-      handleEMA200 == INVALID_HANDLE)
+      handleHTF_Fast == INVALID_HANDLE || handleHTF_Slow == INVALID_HANDLE)
    {
       Print("Indicator Failed To Load!");
       return(INIT_FAILED);
@@ -129,7 +112,6 @@ void OnDeinit(const int reason)
    IndicatorRelease(handleATR);
    IndicatorRelease(handleHTF_Fast);
    IndicatorRelease(handleHTF_Slow);
-   IndicatorRelease(handleEMA200);   // FIX 3
 }
 
 //+------------------------------------------------------------------+
@@ -159,10 +141,6 @@ void OnTick()
    double htfFast[], htfSlow[];
    ArraySetAsSeries(htfFast, true); ArraySetAsSeries(htfSlow, true);
 
-   // FIX 3 – current-TF 200 EMA
-   double ema200[];
-   ArraySetAsSeries(ema200, true);
-
    if(CopyBuffer(handleBB, 1, 0, 3, bbUpper) < 3) return;
    if(CopyBuffer(handleBB, 2, 0, 3, bbLower) < 3) return;
    if(CopyBuffer(handleRSI, 0, 0, 3, rsi) < 3) return;
@@ -171,7 +149,6 @@ void OnTick()
    if(CopyBuffer(handleADX, 2, 0, 3, adxMinus) < 3) return;
    if(CopyBuffer(handleHTF_Fast, 0, 0, 2, htfFast) < 2) return;
    if(CopyBuffer(handleHTF_Slow, 0, 0, 2, htfSlow) < 2) return;
-   if(CopyBuffer(handleEMA200, 0, 0, 2, ema200) < 2) return;   // FIX 3
 
    // Base ADX & Trend
    double adx     = adxMain[1];
@@ -207,8 +184,7 @@ void OnTick()
    // ======================================================
    // BUY SCORING ENGINE
    // ======================================================
-   // FIX 2 – RSI threshold tightened from 35 to 30
-   if(low1 <= bbLower[1] && rsi[1] < 30 && bullishCandle && strongBuyReversal)
+   if(low1 <= bbLower[1] && rsi[1] < 35 && bullishCandle && strongBuyReversal)
    {
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_BUY)) return;
 
@@ -226,11 +202,6 @@ void OnTick()
          else if(score == 2) scoreRisk = InpRiskLevel2; // High Probability Sniper
       }
 
-      // FIX 3 – Level 1 Baseline Trend Filter: skip BUY if price is below the
-      // current-TF 200 EMA (scalping against the immediate trend is prohibited).
-      // Level 2 and Level 3 are exempt – they require strict 4H alignment already.
-      if(scoreRisk == InpRiskLevel1 && close1 <= ema200[1]) return;
-
       ExecuteHFTOrder(ORDER_TYPE_BUY, Ask, slPoints, scoreRisk);
       return;
    }
@@ -238,8 +209,7 @@ void OnTick()
    // ======================================================
    // SELL SCORING ENGINE
    // ======================================================
-   // FIX 2 – RSI threshold tightened from 65 to 70
-   if(high1 >= bbUpper[1] && rsi[1] > 70 && bearishCandle && strongSellReversal)
+   if(high1 >= bbUpper[1] && rsi[1] > 65 && bearishCandle && strongSellReversal)
    {
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_SELL)) return;
 
@@ -256,11 +226,6 @@ void OnTick()
          if(score == 3)      scoreRisk = InpRiskLevel3; // God Tier
          else if(score == 2) scoreRisk = InpRiskLevel2; // High Probability Sniper
       }
-
-      // FIX 3 – Level 1 Baseline Trend Filter: skip SELL if price is above the
-      // current-TF 200 EMA (scalping against the immediate trend is prohibited).
-      // Level 2 and Level 3 are exempt – they require strict 4H alignment already.
-      if(scoreRisk == InpRiskLevel1 && close1 >= ema200[1]) return;
 
       ExecuteHFTOrder(ORDER_TYPE_SELL, Bid, slPoints, scoreRisk);
       return;
