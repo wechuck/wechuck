@@ -1,0 +1,489 @@
+//+------------------------------------------------------------------+
+//|                                              SCALP GOLDEA.mq5    |
+//|                                  Copyright 2026, Trading Pro     |
+//|            V10.0 - Sniper Level 2/3 & HFT Level 1 Integration    |
+//+------------------------------------------------------------------+
+// Changelog:
+//   v10.0 – Sniper Level 2/3 architecture merged with HFT Level 1.
+//           HTF (H4) EMA 50/200 alignment gates Level 2 and Level 3 upgrades.
+//           ADX slope (increasing momentum) added as confirmation layer.
+//           Staged exits: Partial TP at 40 pips, delayed breakeven at 45 pips,
+//           wide trailing stop (65 pips / 20-pip steps) to let Gold breathe.
+//           Volatility filter (ATR × 4 spike rejection + body-to-ATR ratio).
+//           Daily trade cap enforced via deal history scan.
+//
+//  FIXES APPLIED (backtest analysis):
+//   FIX 1 – MICRO-ACCOUNT LOT BOOST: when risk-calculation yields a lot below
+//            the broker minimum (0.01), the EA is "on a micro account".  In that
+//            case Level 2 is boosted to 2 × minVolume and Level 3 to 3 × minVolume
+//            so each sniper tier actually trades a distinct, larger position.
+//
+//   FIX 2 – TIGHTER RSI THRESHOLDS: changed from 35 / 65 to 30 / 70 to avoid
+//            entering too early during strong trend pushes, reducing the number
+//            of stop-loss hits that drag down the risk-to-reward ratio.
+//
+//   FIX 3 – LEVEL 1 BASELINE TREND FILTER: a 200-period EMA on the current
+//            timeframe is now required to align with every Level 1 scalp.
+//            BUY signals are skipped when price is below the EMA; SELL signals
+//            are skipped when price is above it.  Level 2 and Level 3 are exempt
+//            because they already require strict 4-Hour HTF alignment.
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2026, Trading Pro"
+#property link      "https://www.mql5.com"
+#property version   "10.00"
+#property strict
+
+#include <Trade\Trade.mqh>
+
+//--- INPUT PARAMETERS
+input group "=== DYNAMIC SIGNAL SCORING (HFT) ==="
+input double   InpRiskLevel1     = 2.0;       // Level 1: Daily HFT Scalping
+input double   InpRiskLevel2     = 5.0;       // Level 2: Sniper Trade (HTF Aligned)
+input double   InpRiskLevel3     = 10.0;      // Level 3: God-Tier Trade (Perfect Confluence)
+
+input group "=== SNIPER HTF FILTER (FOR LEVEL 2/3) ==="
+input ENUM_TIMEFRAMES InpHTF     = PERIOD_H4; // Higher Timeframe for 100% setup
+input int      InpHTF_FastEMA    = 50;        // HTF Fast Trend
+input int      InpHTF_SlowEMA    = 200;       // HTF Macro Trend
+
+// FIX 3 – Level 1 baseline trend filter (current timeframe)
+input group "=== LEVEL 1 BASELINE TREND FILTER ==="
+input int      InpBaseEMAPeriod  = 200;       // EMA period on current TF (Level 1 filter)
+
+input group "=== HFT EXECUTION & GOALS ==="
+input double   InpStopLossPips   = 80.0;      // Increased SL for Gold Volatility (80 pips)
+input double   InpTakeProfitPips = 550.0;     // Extended TP for runners (550 pips)
+input double   InpPartialTPPips  = 40.0;      // TP1: Close 50% here to lock profit
+input double   InpPipMultiplier  = 10.0;      // Points per Pip (10 for Gold)
+
+input group "=== BREAK-EVEN & TRAILING (RELAXED) ==="
+input double   InpBETriggerPips  = 45.0;      // Wait for 45 pips before moving to BE
+input double   InpBELockPips     = 10.0;      // Lock 10 pips (covers spread + small gain)
+input double   InpTrailDistPips  = 65.0;      // Wider trail to let Gold breathe
+input double   InpTrailStepPips  = 20.0;      // Larger steps to avoid micro-stops
+
+input group "=== DISCIPLINE LIMITS (10 TRADES) ==="
+input int      InpMaxTradesDay   = 10;        // Strict max 10 trades per day
+input int      InpMagic          = 7772028;   // HFT Magic Number
+
+input group "=== FILTERS & SAFETY ==="
+input int      InpMaxSpread      = 45;        // More realistic for Gold (45 points)
+input int      InpMaxSlippage    = 30;        // Realistic Slippage for Gold HFT
+input bool     InpUseVolFilter   = true;      // Dynamic Trend-Expansion Filter
+input bool     InpUseADXConfirmation = true;  // Check ADX Slope (Increasing Momentum)
+
+input group "=== TIME BLACKOUTS ==="
+input int      InpHourStart      = 1;         // Start HFT
+input int      InpHourEnd        = 22;        // Pause before Asian consolidation
+
+//--- GLOBALS
+CTrade trade;
+int handleBB, handleRSI, handleADX, handleATR;
+int handleHTF_Fast, handleHTF_Slow;
+int handleEMA200;                             // FIX 3 – current-TF 200 EMA handle
+double stepVolume, minVolume, maxVolume;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   trade.SetExpertMagicNumber(InpMagic);
+   trade.SetDeviationInPoints(InpMaxSlippage);
+   trade.SetTypeFilling(SYMBOL_FILLING_IOC);
+
+   stepVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   minVolume  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   maxVolume  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+
+   // Base Timeframe Indicators
+   handleBB  = iBands(_Symbol, _Period, 20, 0, 2.0, PRICE_CLOSE);
+   handleRSI = iRSI(_Symbol, _Period, 7, PRICE_CLOSE);
+   handleADX = iADX(_Symbol, _Period, 14);
+   handleATR = iATR(_Symbol, _Period, 14);
+
+   // Higher Timeframe (Sniper) Indicators
+   handleHTF_Fast = iMA(_Symbol, InpHTF, InpHTF_FastEMA, 0, MODE_EMA, PRICE_CLOSE);
+   handleHTF_Slow = iMA(_Symbol, InpHTF, InpHTF_SlowEMA, 0, MODE_EMA, PRICE_CLOSE);
+
+   // FIX 3 – 200 EMA on the current timeframe for the Level 1 baseline trend filter
+   handleEMA200 = iMA(_Symbol, _Period, InpBaseEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+
+   if(handleBB == INVALID_HANDLE || handleRSI == INVALID_HANDLE ||
+      handleADX == INVALID_HANDLE || handleATR == INVALID_HANDLE ||
+      handleHTF_Fast == INVALID_HANDLE || handleHTF_Slow == INVALID_HANDLE ||
+      handleEMA200 == INVALID_HANDLE)
+   {
+      Print("Indicator Failed To Load!");
+      return(INIT_FAILED);
+   }
+
+   return(INIT_SUCCEEDED);
+}
+
+void OnDeinit(const int reason)
+{
+   IndicatorRelease(handleBB);
+   IndicatorRelease(handleRSI);
+   IndicatorRelease(handleADX);
+   IndicatorRelease(handleATR);
+   IndicatorRelease(handleHTF_Fast);
+   IndicatorRelease(handleHTF_Slow);
+   IndicatorRelease(handleEMA200);   // FIX 3
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   ManageHFTExits();
+
+   if(PositionsTotal() > 0) return;
+   if(!IsTradingTime()) return;
+   if(DailyLimitsReached()) return;
+
+   double Ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double Bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   double spread = (Ask - Bid) / _Point;
+   if(spread > InpMaxSpread) return;
+
+   // Base Indicators
+   double bbUpper[], bbLower[], rsi[], adxMain[], adxPlus[], adxMinus[];
+   ArraySetAsSeries(bbUpper, true); ArraySetAsSeries(bbLower, true);
+   ArraySetAsSeries(rsi, true);     ArraySetAsSeries(adxMain, true);
+   ArraySetAsSeries(adxPlus, true); ArraySetAsSeries(adxMinus, true);
+
+   // HTF Indicators
+   double htfFast[], htfSlow[];
+   ArraySetAsSeries(htfFast, true); ArraySetAsSeries(htfSlow, true);
+
+   // FIX 3 – current-TF 200 EMA
+   double ema200[];
+   ArraySetAsSeries(ema200, true);
+
+   if(CopyBuffer(handleBB, 1, 0, 3, bbUpper) < 3) return;
+   if(CopyBuffer(handleBB, 2, 0, 3, bbLower) < 3) return;
+   if(CopyBuffer(handleRSI, 0, 0, 3, rsi) < 3) return;
+   if(CopyBuffer(handleADX, 0, 0, 3, adxMain) < 3) return;
+   if(CopyBuffer(handleADX, 1, 0, 3, adxPlus) < 3) return;
+   if(CopyBuffer(handleADX, 2, 0, 3, adxMinus) < 3) return;
+   if(CopyBuffer(handleHTF_Fast, 0, 0, 2, htfFast) < 2) return;
+   if(CopyBuffer(handleHTF_Slow, 0, 0, 2, htfSlow) < 2) return;
+   if(CopyBuffer(handleEMA200, 0, 0, 2, ema200) < 2) return;   // FIX 3
+
+   // Base ADX & Trend
+   double adx     = adxMain[1];
+   double adxPrev = adxMain[2];
+   double plus    = adxPlus[1];
+   double minus   = adxMinus[1];
+
+   bool bullishTrend = (plus > minus);
+   bool bearishTrend = (minus > plus);
+   bool adxRising    = (adx > adxPrev);
+
+   // HTF (Sniper) Alignment
+   bool htfBullish = (htfFast[1] > htfSlow[1]);
+   bool htfBearish = (htfFast[1] < htfSlow[1]);
+
+   // Candle structure
+   double close1 = iClose(_Symbol, _Period, 1);
+   double open1  = iOpen(_Symbol, _Period, 1);
+   double high1  = iHigh(_Symbol, _Period, 1);
+   double low1   = iLow(_Symbol, _Period, 1);
+   double close2 = iClose(_Symbol, _Period, 2);
+   double high2  = iHigh(_Symbol, _Period, 2);
+   double low2   = iLow(_Symbol, _Period, 2);
+
+   bool bullishCandle = close1 > open1;
+   bool bearishCandle = close1 < open1;
+
+   bool strongBuyReversal  = (close1 > close2) && (high1 > high2);
+   bool strongSellReversal = (close1 < close2) && (low1 < low2);
+
+   double slPoints = InpStopLossPips * InpPipMultiplier;
+
+   // ======================================================
+   // BUY SCORING ENGINE
+   // ======================================================
+   // FIX 2 – RSI threshold tightened from 35 to 30
+   if(low1 <= bbLower[1] && rsi[1] < 30 && bullishCandle && strongBuyReversal)
+   {
+      if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_BUY)) return;
+
+      double scoreRisk = InpRiskLevel1; // Default: Level 1 scalp
+
+      // SNIPER UPGRADE: Level 2/3 only when 4-Hour trend aligns perfectly
+      if(bullishTrend && htfBullish)
+      {
+         int score = 0;
+         if(adx > 25) score++;      // Stricter ADX for higher levels
+         if(adx > 35) score++;      // Extreme momentum
+         if(adxRising) score++;
+
+         if(score == 3)      scoreRisk = InpRiskLevel3; // God Tier
+         else if(score == 2) scoreRisk = InpRiskLevel2; // High Probability Sniper
+      }
+
+      // FIX 3 – Level 1 Baseline Trend Filter: skip BUY if price is below the
+      // current-TF 200 EMA (scalping against the immediate trend is prohibited).
+      // Level 2 and Level 3 are exempt – they require strict 4H alignment already.
+      if(scoreRisk == InpRiskLevel1 && close1 <= ema200[1]) return;
+
+      ExecuteHFTOrder(ORDER_TYPE_BUY, Ask, slPoints, scoreRisk);
+      return;
+   }
+
+   // ======================================================
+   // SELL SCORING ENGINE
+   // ======================================================
+   // FIX 2 – RSI threshold tightened from 65 to 70
+   if(high1 >= bbUpper[1] && rsi[1] > 70 && bearishCandle && strongSellReversal)
+   {
+      if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_SELL)) return;
+
+      double scoreRisk = InpRiskLevel1; // Default: Level 1 scalp
+
+      // SNIPER UPGRADE: Level 2/3 only when 4-Hour trend aligns perfectly
+      if(bearishTrend && htfBearish)
+      {
+         int score = 0;
+         if(adx > 25) score++;      // Stricter ADX
+         if(adx > 35) score++;      // Extreme momentum
+         if(adxRising) score++;
+
+         if(score == 3)      scoreRisk = InpRiskLevel3; // God Tier
+         else if(score == 2) scoreRisk = InpRiskLevel2; // High Probability Sniper
+      }
+
+      // FIX 3 – Level 1 Baseline Trend Filter: skip SELL if price is above the
+      // current-TF 200 EMA (scalping against the immediate trend is prohibited).
+      // Level 2 and Level 3 are exempt – they require strict 4H alignment already.
+      if(scoreRisk == InpRiskLevel1 && close1 >= ema200[1]) return;
+
+      ExecuteHFTOrder(ORDER_TYPE_SELL, Bid, slPoints, scoreRisk);
+      return;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| EXECUTION: Fire Scalp Payload with Lot Calculation               |
+//| FIX 1 – Micro-Account Lot Boost included                         |
+//+------------------------------------------------------------------+
+void ExecuteHFTOrder(ENUM_ORDER_TYPE type, double price, double slPoints, double assignedRisk)
+{
+   double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
+   double freeMargin = AccountInfoDouble(ACCOUNT_FREEMARGIN);
+
+   double moneyRisk  = balance * (assignedRisk / 100.0);
+   double tickValue  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+
+   double lossPerLot = (slPoints * _Point / tickSize) * tickValue;
+   if(lossPerLot <= 0) return;
+
+   // --- Standard risk-based lot calculation ---
+   double rawLot = moneyRisk / lossPerLot;
+   double calculatedLot = MathFloor(rawLot / stepVolume) * stepVolume;
+
+   if(calculatedLot > maxVolume) calculatedLot = maxVolume;
+   if(calculatedLot < minVolume) calculatedLot = minVolume;
+
+   // FIX 1 – MICRO-ACCOUNT LOT BOOST
+   // When the raw calculated lot is at or below the broker minimum it means the
+   // account balance is too small for the risk-percentage formula to produce
+   // meaningful lot differentiation between levels.  Artificially boost Level 2
+   // to 2 × minVolume and Level 3 to 3 × minVolume so that sniper setups always
+   // trade a meaningfully larger position than a plain Level 1 scalp.
+   bool isMicroAccount = (rawLot <= minVolume);
+   if(isMicroAccount)
+   {
+      double boostMultiplier = 1.0;
+      if(assignedRisk >= InpRiskLevel3)
+         boostMultiplier = 3.0;
+      else if(assignedRisk >= InpRiskLevel2)
+         boostMultiplier = 2.0;
+
+      calculatedLot = MathFloor((minVolume * boostMultiplier) / stepVolume) * stepVolume;
+      if(calculatedLot > maxVolume) calculatedLot = maxVolume;
+      if(calculatedLot < minVolume) calculatedLot = minVolume;
+   }
+
+   // --- Margin safety check ---
+   double marginReq = 0.0;
+   if(OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, calculatedLot, price, marginReq))
+   {
+      if(marginReq > freeMargin * 0.90)
+      {
+         double reduction = (freeMargin * 0.90) / marginReq;
+         calculatedLot = MathFloor((calculatedLot * reduction) / stepVolume) * stepVolume;
+      }
+   }
+
+   if(calculatedLot < minVolume) return;
+
+   double sl, tp;
+   string comment;
+   if(assignedRisk >= InpRiskLevel3)
+      comment = "V10_SniperL3";
+   else if(assignedRisk >= InpRiskLevel2)
+      comment = "V10_SniperL2";
+   else
+      comment = "V10_ScalpL1";
+
+   if(type == ORDER_TYPE_BUY)
+   {
+      sl = price - slPoints * _Point;
+      tp = price + (InpTakeProfitPips * InpPipMultiplier * _Point);
+      trade.Buy(calculatedLot, _Symbol, price, sl, tp, comment);
+   }
+   else
+   {
+      sl = price + slPoints * _Point;
+      tp = price - (InpTakeProfitPips * InpPipMultiplier * _Point);
+      trade.Sell(calculatedLot, _Symbol, price, sl, tp, comment);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Staged Exits: Partial TP, Delayed Breakeven, Relaxed Trailing    |
+//+------------------------------------------------------------------+
+void ManageHFTExits()
+{
+   double Ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double Bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   double partialTPDist = InpPartialTPPips  * InpPipMultiplier * _Point;
+   double beTriggerDist = InpBETriggerPips  * InpPipMultiplier * _Point;
+   double beLockDist    = InpBELockPips     * InpPipMultiplier * _Point;
+   double trailDist     = InpTrailDistPips  * InpPipMultiplier * _Point;
+   double trailStep     = InpTrailStepPips  * InpPipMultiplier * _Point;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+
+      double currentSL = PositionGetDouble(POSITION_SL);
+      double tp        = PositionGetDouble(POSITION_TP);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double volume    = PositionGetDouble(POSITION_VOLUME);
+      long   posType   = PositionGetInteger(POSITION_TYPE);
+      string comment   = PositionGetString(POSITION_COMMENT);
+
+      // --- Partial close at TP1 (once per trade) ---
+      if(StringFind(comment, "Partial") < 0)
+      {
+         bool triggerPartial = (posType == POSITION_TYPE_BUY  && Bid >= openPrice + partialTPDist) ||
+                               (posType == POSITION_TYPE_SELL && Ask <= openPrice - partialTPDist);
+
+         if(triggerPartial)
+         {
+            double closeLot = MathFloor((volume / 2.0) / stepVolume) * stepVolume;
+            if(closeLot >= minVolume)
+            {
+               trade.PositionClosePartial(ticket, closeLot, "V10_Partial");
+               continue;
+            }
+         }
+      }
+
+      // --- Breakeven and trailing ---
+      if(posType == POSITION_TYPE_BUY)
+      {
+         // Move SL to breakeven + lock pips once BE trigger is reached
+         if(Bid >= openPrice + beTriggerDist)
+         {
+            double beSL = openPrice + beLockDist;
+            if(currentSL < beSL - (_Point * 10))
+            {
+               trade.PositionModify(ticket, beSL, tp);
+               continue;
+            }
+         }
+         // Trail once SL is already in profit territory
+         if(currentSL >= openPrice + beLockDist)
+         {
+            double newSL = Bid - trailDist;
+            if(newSL > currentSL + trailStep)
+               trade.PositionModify(ticket, newSL, tp);
+         }
+      }
+      else if(posType == POSITION_TYPE_SELL)
+      {
+         // Move SL to breakeven + lock pips once BE trigger is reached
+         if(Ask <= openPrice - beTriggerDist)
+         {
+            double beSL = openPrice - beLockDist;
+            if(currentSL > beSL + (_Point * 10) || currentSL == 0)
+            {
+               trade.PositionModify(ticket, beSL, tp);
+               continue;
+            }
+         }
+         // Trail once SL is already in profit territory
+         if(currentSL <= openPrice - beLockDist && currentSL != 0)
+         {
+            double newSL = Ask + trailDist;
+            if(newSL < currentSL - trailStep)
+               trade.PositionModify(ticket, newSL, tp);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Volatility Filter: reject spike entries and low-body candles     |
+//+------------------------------------------------------------------+
+bool IsVolatilitySafe(ENUM_ORDER_TYPE type)
+{
+   double atrData[];
+   ArraySetAsSeries(atrData, true);
+   if(CopyBuffer(handleATR, 0, 0, 10, atrData) < 10) return false;
+
+   double avgATR = 0;
+   for(int i = 1; i < 10; i++) avgATR += atrData[i];
+   avgATR /= 9.0;
+
+   // Reject if current bar is a violent spike (> 4× average ATR)
+   if(atrData[0] > avgATR * 4.0) return false;
+
+   // During moderate expansion (2–4× ATR), require a healthy candle body
+   double body = MathAbs(iClose(_Symbol, _Period, 1) - iOpen(_Symbol, _Period, 1));
+   if(atrData[0] > avgATR * 2.0)
+   {
+      if(body < (atrData[0] * 0.5)) return false;
+   }
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| UTILITIES                                                        |
+//+------------------------------------------------------------------+
+bool DailyLimitsReached()
+{
+   datetime todayStart = iTime(_Symbol, PERIOD_D1, 0);
+   HistorySelect(todayStart, TimeCurrent());
+
+   int tradesToday = 0;
+   for(int i = 0; i < HistoryDealsTotal(); i++)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_OUT &&
+         HistoryDealGetInteger(ticket, DEAL_MAGIC) == InpMagic)
+      {
+         tradesToday++;
+      }
+   }
+   return (tradesToday >= InpMaxTradesDay);
+}
+
+bool IsTradingTime()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   return (dt.hour >= InpHourStart && dt.hour < InpHourEnd);
+}
