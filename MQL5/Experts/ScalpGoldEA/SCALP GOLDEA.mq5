@@ -64,6 +64,14 @@ input group "=== TIME BLACKOUTS ==="
 input int      InpHourStart      = 1;         // Start HFT
 input int      InpHourEnd        = 22;        // Pause before Asian consolidation
 
+input group "=== 500 PIP CHALLENGE MODE ==="
+input bool     InpChallengeMode       = false; // Enable $20→$40k Challenge Mode
+input double   InpChallengeRisk       = 30.0;  // Risk per trade in Challenge (%)
+input double   InpChallengeSL         = 150.0; // Stop Loss in Challenge (pips)
+input double   InpChallengeTP_Early   = 500.0; // TP when balance < threshold (pips)
+input double   InpChallengeTP_Late    = 20.0;  // TP when balance >= threshold (pips)
+input double   InpChallengeThreshold  = 300.0; // Balance threshold: switch from Early to Late TP ($)
+
 //--- GLOBALS
 CTrade trade;
 int handleBB, handleRSI, handleADX, handleATR;
@@ -235,17 +243,35 @@ void OnTick()
 //+------------------------------------------------------------------+
 //| EXECUTION: Fire Scalp Payload with Lot Calculation               |
 //| FIX 1 – Micro-Account Lot Boost included                         |
+//| CHALLENGE – 30% risk, 150 SL, adaptive TP when enabled           |
 //+------------------------------------------------------------------+
 void ExecuteHFTOrder(ENUM_ORDER_TYPE type, double price, double slPoints, double assignedRisk)
 {
    double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
    double freeMargin = AccountInfoDouble(ACCOUNT_FREEMARGIN);
 
-   double moneyRisk  = balance * (assignedRisk / 100.0);
+   // --- CHALLENGE MODE OVERRIDES ---
+   double effectiveRisk   = assignedRisk;
+   double effectiveSL     = slPoints;
+   double effectiveTPPips = InpTakeProfitPips;
+
+   if(InpChallengeMode)
+   {
+      effectiveRisk = InpChallengeRisk;   // 30% of balance per trade
+      effectiveSL   = InpChallengeSL * InpPipMultiplier;
+
+      // Adaptive TP: large pip target early (small balance needs big RR),
+      // switch to fast scalp target once balance compounds past the threshold.
+      effectiveTPPips = (balance < InpChallengeThreshold)
+                        ? InpChallengeTP_Early
+                        : InpChallengeTP_Late;
+   }
+
+   double moneyRisk  = balance * (effectiveRisk / 100.0);
    double tickValue  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double tickSize   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
 
-   double lossPerLot = (slPoints * _Point / tickSize) * tickValue;
+   double lossPerLot = (effectiveSL * _Point / tickSize) * tickValue;
    if(lossPerLot <= 0) return;
 
    // --- Standard risk-based lot calculation ---
@@ -259,16 +285,16 @@ void ExecuteHFTOrder(ENUM_ORDER_TYPE type, double price, double slPoints, double
    // When the raw calculated lot is at or below the broker minimum it means the
    // account balance is too small for the risk-percentage formula to produce
    // meaningful lot differentiation between levels.  Artificially boost Level 2
-   // to 2 × minVolume and Level 3 to 3 × minVolume so that sniper setups always
-   // trade a meaningfully larger position than a plain Level 1 scalp.
+   // to 2 × minVolume and Level 3 to 3 × minVolume (5 × in challenge mode so that
+   // sniper setups always trade a meaningfully larger position than a plain Level 1 scalp.
    bool isMicroAccount = (rawLot <= minVolume);
    if(isMicroAccount)
    {
       double boostMultiplier = 1.0;
       if(assignedRisk >= InpRiskLevel3)
-         boostMultiplier = 3.0;
+         boostMultiplier = InpChallengeMode ? 5.0 : 3.0;
       else if(assignedRisk >= InpRiskLevel2)
-         boostMultiplier = 2.0;
+         boostMultiplier = InpChallengeMode ? 3.0 : 2.0;
 
       calculatedLot = MathFloor((minVolume * boostMultiplier) / stepVolume) * stepVolume;
       if(calculatedLot > maxVolume) calculatedLot = maxVolume;
@@ -299,14 +325,14 @@ void ExecuteHFTOrder(ENUM_ORDER_TYPE type, double price, double slPoints, double
 
    if(type == ORDER_TYPE_BUY)
    {
-      sl = price - slPoints * _Point;
-      tp = price + (InpTakeProfitPips * InpPipMultiplier * _Point);
+      sl = price - effectiveSL * _Point;
+      tp = price + (effectiveTPPips * InpPipMultiplier * _Point);
       trade.Buy(calculatedLot, _Symbol, price, sl, tp, comment);
    }
    else
    {
-      sl = price + slPoints * _Point;
-      tp = price - (InpTakeProfitPips * InpPipMultiplier * _Point);
+      sl = price + effectiveSL * _Point;
+      tp = price - (effectiveTPPips * InpPipMultiplier * _Point);
       trade.Sell(calculatedLot, _Symbol, price, sl, tp, comment);
    }
 }
@@ -338,8 +364,8 @@ void ManageHFTExits()
       long   posType   = PositionGetInteger(POSITION_TYPE);
       string comment   = PositionGetString(POSITION_COMMENT);
 
-      // --- Partial close at TP1 (once per trade) ---
-      if(StringFind(comment, "Partial") < 0)
+      // --- Partial close at TP1 (once per trade, disabled in challenge mode) ---
+      if(!InpChallengeMode && StringFind(comment, "Partial") < 0)
       {
          bool triggerPartial = (posType == POSITION_TYPE_BUY  && Bid >= openPrice + partialTPDist) ||
                                (posType == POSITION_TYPE_SELL && Ask <= openPrice - partialTPDist);
