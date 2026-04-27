@@ -1,26 +1,28 @@
 //+------------------------------------------------------------------+
 //|                                              SCALP GOLDEA.mq5    |
 //|                                  Copyright 2026, Trading Pro     |
-//|   V12.0 - Bad-Trade Blocker: H1 Trend Gate + Min ADX            |
+//|            V10.0 - Sniper Level 2/3 & HFT Level 1 Integration    |
 //+------------------------------------------------------------------+
 // Changelog:
-//   v12.0 – BAD-TRADE BLOCKER:
-//           RSI thresholds restored to 35/65 (tight = 88% win rate).
-//           InpUseTrendGate (default true): H1 EMA21/50 direction must
-//           agree with trade direction for ALL entries – specifically
-//           kills counter-trend BB scalps that cause losing trades.
-//           InpMinADX (default 18): minimum ADX required to enter –
-//           blocks choppy-market false BB touches where ADX is low.
-//           Together these two filters target only the losing trades
-//           without removing winning setups.
-//   v11.0 – Multi-position (InpMaxPositions=3), TP 120 pips, H1 HTF
-//           challenge filter.
-//   v10.0 – Sniper L2/L3, HTF H4 EMA gate, ADX scoring, micro-lot
-//           boost, challenge mode, protection guards.
+//   v10.0 – Sniper Level 2/3 architecture merged with HFT Level 1.
+//           HTF (H4) EMA 50/200 alignment gates Level 2 and Level 3 upgrades.
+//           ADX slope (increasing momentum) added as confirmation layer.
+//           Staged exits: Partial TP at 40 pips, delayed breakeven at 45 pips,
+//           wide trailing stop (65 pips / 20-pip steps) to let Gold breathe.
+//           Volatility filter (ATR × 4 spike rejection + body-to-ATR ratio).
+//           Daily trade cap enforced via deal history scan.
+//
+//  FIX APPLIED (backtest analysis):
+//   FIX 1 – MICRO-ACCOUNT LOT BOOST: when risk-calculation yields a lot below
+//            the broker minimum (0.01), the EA is "on a micro account".  In that
+//            case Level 2 is boosted to 2 × minVolume and Level 3 to 3 × minVolume
+//            so each sniper tier actually trades a distinct, larger position.
+//            RSI thresholds and Level 1 entry rules are unchanged from V10.0
+//            to preserve the profitable 140-trade frequency shown in backtests.
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Pro"
 #property link      "https://www.mql5.com"
-#property version   "12.00"
+#property version   "10.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -38,7 +40,7 @@ input int      InpHTF_SlowEMA    = 200;       // HTF Macro Trend
 
 input group "=== HFT EXECUTION & GOALS ==="
 input double   InpStopLossPips   = 80.0;      // Increased SL for Gold Volatility (80 pips)
-input double   InpTakeProfitPips = 120.0;     // TP per trade – 120 pips closes fast, frees slot
+input double   InpTakeProfitPips = 550.0;     // Extended TP for runners (550 pips)
 input double   InpPartialTPPips  = 40.0;      // TP1: Close 50% here to lock profit
 input double   InpPipMultiplier  = 10.0;      // Points per Pip (10 for Gold)
 
@@ -50,7 +52,6 @@ input double   InpTrailStepPips  = 20.0;      // Larger steps to avoid micro-sto
 
 input group "=== DISCIPLINE LIMITS (10 TRADES) ==="
 input int      InpMaxTradesDay   = 10;        // Strict max 10 trades per day
-input int      InpMaxPositions   = 3;         // Max concurrent EA positions (prevents slot starvation)
 input int      InpMagic          = 7772028;   // HFT Magic Number
 
 input group "=== FILTERS & SAFETY ==="
@@ -58,8 +59,6 @@ input int      InpMaxSpread      = 45;        // More realistic for Gold (45 poi
 input int      InpMaxSlippage    = 30;        // Realistic Slippage for Gold HFT
 input bool     InpUseVolFilter   = true;      // Dynamic Trend-Expansion Filter
 input bool     InpUseADXConfirmation = true;  // Check ADX Slope (Increasing Momentum)
-input bool     InpUseTrendGate   = true;      // BAD-TRADE BLOCKER: require H1 EMA trend alignment for ALL entries
-input double   InpMinADX         = 18.0;      // BAD-TRADE BLOCKER: skip entry when ADX below this (choppy market)
 
 input group "=== TIME BLACKOUTS ==="
 input int      InpHourStart      = 1;         // Start HFT
@@ -73,25 +72,11 @@ input double   InpChallengeTP_Early   = 500.0; // TP when balance < threshold (p
 input double   InpChallengeTP_Late    = 20.0;  // TP when balance >= threshold (pips)
 input double   InpChallengeThreshold  = 300.0; // Balance threshold: switch from Early to Late TP ($)
 
-input group "=== CHALLENGE PROTECTION (SMOOTH EQUITY CURVE) ==="
-input double          InpChallengeDailyDDPct     = 15.0;       // Stop if daily drawdown hits this % – no more entries today
-input int             InpChallengeMaxConsecLoss  = 2;          // Pause after N consecutive losses in one day
-input double          InpChallengeDailyProfitPct = 50.0;       // Stop after gaining this % in one day – lock the profit
-input double          InpChallengeBETrigger      = 25.0;       // Move to breakeven after X pips (faster than normal 45)
-input ENUM_TIMEFRAMES InpChallengeHTF            = PERIOD_H1;  // Challenge entry filter TF (H1 = ~15× more signals than H4)
-input int             InpChallengeHTF_FastEMA    = 21;         // Challenge HTF fast EMA period
-input int             InpChallengeHTF_SlowEMA    = 50;         // Challenge HTF slow EMA period
-
 //--- GLOBALS
 CTrade trade;
 int handleBB, handleRSI, handleADX, handleATR;
 int handleHTF_Fast, handleHTF_Slow;
-int handleChalHTF_Fast, handleChalHTF_Slow;   // Challenge-mode H1 EMA filter
 double stepVolume, minVolume, maxVolume;
-
-// Challenge mode daily tracking
-double   g_DayStartBalance = 0.0;
-datetime g_LastDayStart    = 0;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -106,10 +91,6 @@ int OnInit()
    minVolume  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    maxVolume  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
 
-   // Initialise daily tracking for challenge protection
-   g_DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-   g_LastDayStart    = iTime(_Symbol, PERIOD_D1, 0);
-
    // Base Timeframe Indicators
    handleBB  = iBands(_Symbol, _Period, 20, 0, 2.0, PRICE_CLOSE);
    handleRSI = iRSI(_Symbol, _Period, 7, PRICE_CLOSE);
@@ -120,14 +101,9 @@ int OnInit()
    handleHTF_Fast = iMA(_Symbol, InpHTF, InpHTF_FastEMA, 0, MODE_EMA, PRICE_CLOSE);
    handleHTF_Slow = iMA(_Symbol, InpHTF, InpHTF_SlowEMA, 0, MODE_EMA, PRICE_CLOSE);
 
-   // Challenge mode uses a faster HTF (H1 EMA21/50) so more signals fire
-   handleChalHTF_Fast = iMA(_Symbol, InpChallengeHTF, InpChallengeHTF_FastEMA, 0, MODE_EMA, PRICE_CLOSE);
-   handleChalHTF_Slow = iMA(_Symbol, InpChallengeHTF, InpChallengeHTF_SlowEMA, 0, MODE_EMA, PRICE_CLOSE);
-
    if(handleBB == INVALID_HANDLE || handleRSI == INVALID_HANDLE ||
       handleADX == INVALID_HANDLE || handleATR == INVALID_HANDLE ||
-      handleHTF_Fast == INVALID_HANDLE || handleHTF_Slow == INVALID_HANDLE ||
-      handleChalHTF_Fast == INVALID_HANDLE || handleChalHTF_Slow == INVALID_HANDLE)
+      handleHTF_Fast == INVALID_HANDLE || handleHTF_Slow == INVALID_HANDLE)
    {
       Print("Indicator Failed To Load!");
       return(INIT_FAILED);
@@ -144,8 +120,6 @@ void OnDeinit(const int reason)
    IndicatorRelease(handleATR);
    IndicatorRelease(handleHTF_Fast);
    IndicatorRelease(handleHTF_Slow);
-   IndicatorRelease(handleChalHTF_Fast);
-   IndicatorRelease(handleChalHTF_Slow);
 }
 
 //+------------------------------------------------------------------+
@@ -155,20 +129,9 @@ void OnTick()
 {
    ManageHFTExits();
 
-   // Reset daily balance snapshot at the start of each new trading day
-   datetime currentDayStart = iTime(_Symbol, PERIOD_D1, 0);
-   if(currentDayStart != g_LastDayStart)
-   {
-      g_DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-      g_LastDayStart    = currentDayStart;
-   }
-
-   if(CountEAPositions() >= InpMaxPositions) return;
+   if(PositionsTotal() > 0) return;
    if(!IsTradingTime()) return;
    if(DailyLimitsReached()) return;
-
-   // Challenge mode equity-curve guards – block new entries if any limit is hit
-   if(InpChallengeMode && ChallengeProtectionTriggered()) return;
 
    double Ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double Bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -182,13 +145,9 @@ void OnTick()
    ArraySetAsSeries(rsi, true);     ArraySetAsSeries(adxMain, true);
    ArraySetAsSeries(adxPlus, true); ArraySetAsSeries(adxMinus, true);
 
-   // HTF Indicators (normal sniper mode)
+   // HTF Indicators
    double htfFast[], htfSlow[];
    ArraySetAsSeries(htfFast, true); ArraySetAsSeries(htfSlow, true);
-
-   // Challenge mode faster HTF (H1 EMA21/50)
-   double chalHTFFast[], chalHTFSlow[];
-   ArraySetAsSeries(chalHTFFast, true); ArraySetAsSeries(chalHTFSlow, true);
 
    if(CopyBuffer(handleBB, 1, 0, 3, bbUpper) < 3) return;
    if(CopyBuffer(handleBB, 2, 0, 3, bbLower) < 3) return;
@@ -198,8 +157,6 @@ void OnTick()
    if(CopyBuffer(handleADX, 2, 0, 3, adxMinus) < 3) return;
    if(CopyBuffer(handleHTF_Fast, 0, 0, 2, htfFast) < 2) return;
    if(CopyBuffer(handleHTF_Slow, 0, 0, 2, htfSlow) < 2) return;
-   if(CopyBuffer(handleChalHTF_Fast, 0, 0, 2, chalHTFFast) < 2) return;
-   if(CopyBuffer(handleChalHTF_Slow, 0, 0, 2, chalHTFSlow) < 2) return;
 
    // Base ADX & Trend
    double adx     = adxMain[1];
@@ -211,13 +168,9 @@ void OnTick()
    bool bearishTrend = (minus > plus);
    bool adxRising    = (adx > adxPrev);
 
-   // HTF (Sniper) Alignment – H4 EMA50/200 for normal mode
+   // HTF (Sniper) Alignment
    bool htfBullish = (htfFast[1] > htfSlow[1]);
    bool htfBearish = (htfFast[1] < htfSlow[1]);
-
-   // Challenge HTF Alignment – H1 EMA21/50 (much more responsive, fires ~15× more)
-   bool chalHTFBullish = (chalHTFFast[1] > chalHTFSlow[1]);
-   bool chalHTFBearish = (chalHTFFast[1] < chalHTFSlow[1]);
 
    // Candle structure
    double close1 = iClose(_Symbol, _Period, 1);
@@ -243,15 +196,6 @@ void OnTick()
    {
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_BUY)) return;
 
-      // BAD-TRADE BLOCKER 1: H1 EMA21/50 must be bullish (blocks counter-trend scalps)
-      if(InpUseTrendGate && !chalHTFBullish) return;
-
-      // BAD-TRADE BLOCKER 2: ADX must show enough trend strength (blocks choppy-market fakes)
-      if(adx < InpMinADX) return;
-
-      // Challenge mode: only take H1-trend-confirmed shots (already enforced above when gate is on)
-      if(InpChallengeMode && !chalHTFBullish) return;
-
       double scoreRisk = InpRiskLevel1; // Default: Level 1 scalp
 
       // SNIPER UPGRADE: Level 2/3 only when 4-Hour trend aligns perfectly
@@ -276,15 +220,6 @@ void OnTick()
    if(high1 >= bbUpper[1] && rsi[1] > 65 && bearishCandle && strongSellReversal)
    {
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_SELL)) return;
-
-      // BAD-TRADE BLOCKER 1: H1 EMA21/50 must be bearish (blocks counter-trend scalps)
-      if(InpUseTrendGate && !chalHTFBearish) return;
-
-      // BAD-TRADE BLOCKER 2: ADX must show enough trend strength (blocks choppy-market fakes)
-      if(adx < InpMinADX) return;
-
-      // Challenge mode: only take H1-trend-confirmed shots (already enforced above when gate is on)
-      if(InpChallengeMode && !chalHTFBearish) return;
 
       double scoreRisk = InpRiskLevel1; // Default: Level 1 scalp
 
@@ -411,8 +346,7 @@ void ManageHFTExits()
    double Bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
    double partialTPDist = InpPartialTPPips  * InpPipMultiplier * _Point;
-   double activeBETrigger = InpChallengeMode ? InpChallengeBETrigger : InpBETriggerPips;
-   double beTriggerDist = activeBETrigger   * InpPipMultiplier * _Point;
+   double beTriggerDist = InpBETriggerPips  * InpPipMultiplier * _Point;
    double beLockDist    = InpBELockPips     * InpPipMultiplier * _Point;
    double trailDist     = InpTrailDistPips  * InpPipMultiplier * _Point;
    double trailStep     = InpTrailStepPips  * InpPipMultiplier * _Point;
@@ -520,96 +454,6 @@ bool IsVolatilitySafe(ENUM_ORDER_TYPE type)
 //+------------------------------------------------------------------+
 //| UTILITIES                                                        |
 //+------------------------------------------------------------------+
-
-//+------------------------------------------------------------------+
-//| Challenge Protection: four guards for a smooth upward equity     |
-//| curve – daily drawdown brake, consecutive-loss cool-down,        |
-//| daily profit lock, and (via ManageHFTExits) faster breakeven.    |
-//+------------------------------------------------------------------+
-bool ChallengeProtectionTriggered()
-{
-   if(g_DayStartBalance <= 0) return false;
-
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
-
-   // 1. Daily drawdown circuit breaker ──────────────────────────────
-   // If today's floating loss drags equity below the day-start
-   // balance by more than InpChallengeDailyDDPct, stop for the day.
-   double dailyDD = (g_DayStartBalance - equity) / g_DayStartBalance * 100.0;
-   if(dailyDD >= InpChallengeDailyDDPct)
-   {
-      Print("CHALLENGE GUARD: Daily DD ", DoubleToString(dailyDD, 1),
-            "% reached. No new entries today.");
-      return true;
-   }
-
-   // 2. Daily profit target lock ─────────────────────────────────────
-   // Once balance has grown by InpChallengeDailyProfitPct today,
-   // stop opening new trades to protect that compounded gain.
-   double dailyGain = (balance - g_DayStartBalance) / g_DayStartBalance * 100.0;
-   if(dailyGain >= InpChallengeDailyProfitPct)
-   {
-      Print("CHALLENGE GUARD: Daily profit target ", DoubleToString(dailyGain, 1),
-            "% hit. Protecting gains.");
-      return true;
-   }
-
-   // 3. Consecutive-loss cool-down ───────────────────────────────────
-   // After InpChallengeMaxConsecLoss losses in a row today,
-   // wait until tomorrow before taking another trade.
-   if(CountConsecLossesToday() >= InpChallengeMaxConsecLoss)
-   {
-      Print("CHALLENGE GUARD: ", InpChallengeMaxConsecLoss,
-            " consecutive losses. Cooling down until tomorrow.");
-      return true;
-   }
-
-   return false;
-}
-
-// Returns how many consecutive losing trades have closed today
-// (scans newest-to-oldest; stops counting the moment a winner is found).
-int CountConsecLossesToday()
-{
-   datetime todayStart = iTime(_Symbol, PERIOD_D1, 0);
-   HistorySelect(todayStart, TimeCurrent());
-
-   int consec = 0;
-   int total  = HistoryDealsTotal();
-   for(int i = total - 1; i >= 0; i--)
-   {
-      ulong ticket = HistoryDealGetTicket(i);
-      if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
-      if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagic)       continue;
-
-      double pnl = HistoryDealGetDouble(ticket, DEAL_PROFIT)
-                 + HistoryDealGetDouble(ticket, DEAL_SWAP)
-                 + HistoryDealGetDouble(ticket, DEAL_COMMISSION);
-      if(pnl < 0)
-         consec++;
-      else
-         break; // A winning trade resets the streak
-   }
-   return consec;
-}
-
-// Counts only positions opened by this EA (matched by magic number).
-// Used to enforce InpMaxPositions concurrent-trade limit without blocking
-// positions from other EAs running on the same account.
-int CountEAPositions()
-{
-   int count = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(PositionSelectByTicket(ticket) &&
-         PositionGetInteger(POSITION_MAGIC) == InpMagic)
-         count++;
-   }
-   return count;
-}
-
 bool DailyLimitsReached()
 {
    datetime todayStart = iTime(_Symbol, PERIOD_D1, 0);
