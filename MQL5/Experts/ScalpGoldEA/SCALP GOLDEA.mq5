@@ -1,9 +1,25 @@
 //+------------------------------------------------------------------+
 //|                                              SCALP GOLDEA.mq5    |
 //|                                  Copyright 2026, Trading Pro     |
-//|   V14.0 - L2/L3 Survival Mode (built on V13.0)                   |
+//|   V15.0 - Drawdown Circuit Breaker (built on V14.0)             |
 //+------------------------------------------------------------------+
 // Changelog:
+//   v15.0 – DRAWDOWN CIRCUIT BREAKER layered on top of V14.0.
+//           All V14.0 logic (L2/L3 Survival Mode, precision timing,
+//           pending signals, re-entry) is completely unchanged.
+//           NEW – Peak Drawdown Halt: if closed balance falls more than
+//           InpMaxPeakDDPct% below its highest recorded level the EA
+//           suspends all new entries for InpDDHaltHours hours.
+//           Existing open positions continue to be managed normally.
+//           NEW – Daily Loss Halt: if today's closed balance is down
+//           more than InpMaxDailyLossPct% versus the day-open balance
+//           the EA suspends new entries until the next calendar day.
+//           NEW – IsGlobalStopped() function checks both limits every
+//           tick; ManageHFTExits() and CheckReentryArm() still run
+//           during a halt so open trades are never left unmanaged.
+//           TOGGLE: InpUseDDProtection = false disables V15 entirely,
+//           restoring identical behaviour to V14.0.
+//
 //   v14.0 – L2/L3 SURVIVAL MODE layered on top of V13.0.
 //           Level 1 frequency and all V13.0 precision-timing logic
 //           are completely unchanged.  L2 and L3 are transformed into
