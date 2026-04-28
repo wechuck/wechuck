@@ -278,9 +278,13 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   // V15 – Update peak balance every tick for drawdown monitoring
-   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   if(equity > g_PeakBalance) g_PeakBalance = equity;
+   // V15 – Update peak from CLOSED balance only (not floating equity).
+   // Using equity here would inflate the peak during open winning trades:
+   // when those trades close for less than their floating peak, the EA
+   // would see a fake >20% DD and permanently stop.  Balance updates only
+   // after a trade closes, giving a stable high-water mark.
+   double curBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   if(curBalance > g_PeakBalance) g_PeakBalance = curBalance;
 
    ManageHFTExits();
    CheckReentryArm();   // detect stop-outs; arm second-chance re-entry
@@ -823,7 +827,7 @@ void CheckReentryArm()
          curCount++;
    }
 
-   if(curCount < g_LastPosCount && !g_ReentryArmed)
+   if(curCount < g_LastPosCount)
    {
       datetime todayStart = iTime(_Symbol, PERIOD_D1, 0);
       HistorySelect(todayStart, TimeCurrent());
@@ -909,8 +913,8 @@ void CheckReentryArm()
             if(isL2) g_L2LastWinTime = TimeCurrent();
          }
 
-         // --- Re-entry arm: only on SL stop-outs ---
-         if(wasLoss)
+         // --- Re-entry arm: only on SL stop-outs, only when not already armed ---
+         if(wasLoss && !g_ReentryArmed)
          {
             // DEAL_TYPE_SELL closes a BUY position → re-entry is BUY (dir=1)
             // DEAL_TYPE_BUY  closes a SELL position → re-entry is SELL (dir=-1)
