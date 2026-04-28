@@ -1,24 +1,39 @@
 //+------------------------------------------------------------------+
 //|                                              SCALP GOLDEA.mq5    |
 //|                                  Copyright 2026, Trading Pro     |
-//|   V15.0 - Drawdown Circuit Breaker (built on V14.0)             |
+//|   V15.0 - DD Circuit Breaker + Tick-Level Signal Engine         |
 //+------------------------------------------------------------------+
 // Changelog:
-//   v15.0 – DRAWDOWN CIRCUIT BREAKER layered on top of V14.0.
-//           All V14.0 logic (L2/L3 Survival Mode, precision timing,
-//           pending signals, re-entry) is completely unchanged.
+//   v15.0 – DRAWDOWN CIRCUIT BREAKER + TICK-LEVEL MULTI-SCENARIO SIGNAL
+//           ENGINE built on top of V14.0.  All V14.0 logic (L2/L3 Survival
+//           Mode, precision timing, pending signals, re-entry) is preserved.
+//
 //           NEW – Peak Drawdown Halt: if closed balance falls more than
-//           InpMaxPeakDDPct% below its highest recorded level the EA
-//           suspends all new entries for InpDDHaltHours hours.
-//           Existing open positions continue to be managed normally.
-//           NEW – Daily Loss Halt: if today's closed balance is down
-//           more than InpMaxDailyLossPct% versus the day-open balance
-//           the EA suspends new entries until the next calendar day.
-//           NEW – IsGlobalStopped() function checks both limits every
-//           tick; ManageHFTExits() and CheckReentryArm() still run
-//           during a halt so open trades are never left unmanaged.
-//           TOGGLE: InpUseDDProtection = false disables V15 entirely,
-//           restoring identical behaviour to V14.0.
+//           InpMaxPeakDDPct% below its all-time high the EA freezes all new
+//           entries for InpDDHaltHours hours.  Open positions keep being
+//           managed by ManageHFTExits() – nothing is ever left unguarded.
+//
+//           NEW – Daily Loss Halt: if today's closed balance is down more
+//           than InpMaxDailyLossPct% versus the day-open balance, new entries
+//           are blocked until the next calendar day (broker midnight).
+//
+//           NEW – Tick-Level Multi-Scenario Engine: addresses the failure
+//           mode where bar[1] fires a BUY/SELL signal but real-time tick
+//           flow has already reversed direction.  On EVERY tick (lowest
+//           latency): (a) a 30-tick rolling up/down bias counter is updated
+//           first, before any other logic; (b) when BOTH tick momentum AND
+//           the forming bar[0] body simultaneously contradict the signal
+//           direction, the entry is deferred via the existing pending-retry
+//           system (never discarded) and re-evaluated on every subsequent
+//           tick until conditions align or the expiry window closes.
+//           Using AND (both must be contrary) prevents over-filtering and
+//           preserves overall trade count while eliminating the highest-
+//           confidence wrong-direction entries.
+//
+//           NEW – UpdateTickMomentum() is the very first call in OnTick()
+//           so tick data is always current before any decision is made.
+//           IsSignalAlignedWithTick() is also applied in TryPendingEntry()
+//           and TryReentry() so retried signals benefit from the same gate.
 //
 //   v14.0 – L2/L3 SURVIVAL MODE layered on top of V13.0.
 //           Level 1 frequency and all V13.0 precision-timing logic
@@ -66,7 +81,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Pro"
 #property link      "https://www.mql5.com"
-#property version   "14.00"
+#property version   "15.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -132,6 +147,12 @@ input int    InpSniperADXSpikeBars = 5;    // Look-back bars for fake-breakout A
 input double InpSniperADXSpikeMin  = 16.0; // If ADX was below this N bars ago → suspect spike
 input double InpSniperMaxWickRatio = 0.45; // Max wick/range ratio on entry candle (L2/L3 only)
 
+input group "=== V15: DRAWDOWN CIRCUIT BREAKER ==="
+input bool   InpUseDDProtection = true;   // Enable global drawdown circuit breaker
+input double InpMaxDailyLossPct = 20.0;   // Halt today if daily balance loss exceeds this %
+input double InpMaxPeakDDPct    = 30.0;   // Halt N hours if balance drops this % from peak
+input int    InpDDHaltHours     = 24;     // Hours to block all new entries after peak DD breach
+
 //--- GLOBALS
 CTrade trade;
 int handleBB, handleRSI, handleADX, handleATR;
@@ -153,6 +174,18 @@ int      g_LastPosCount   = 0;
 // L2/L3 Survival Mode state
 datetime g_L3LastTime          = 0; // Time of last executed L3 trade (for cooldown)
 datetime g_L23LossCooldownEnd  = 0; // L2/L3 blocked until this datetime after a loss
+
+// V15 – Drawdown Circuit Breaker state
+double   g_PeakBalance    = 0.0;   // Highest closed balance seen since EA start
+datetime g_DDHaltUntil    = 0;     // All new entries blocked until this timestamp (0 = inactive)
+double   g_DayOpenBalance = 0.0;   // Balance at start of current trading day
+datetime g_DayOpenTime    = 0;     // Datetime of current day's open (for daily reset detection)
+
+// V15 – Tick-level momentum tracker (rolling 30-tick window, reset when full)
+double   g_LastTickBid = 0.0;   // Bid price from the previous tick (direction reference)
+int      g_TicksBull   = 0;     // Up-ticks counted in current window
+int      g_TicksBear   = 0;     // Down-ticks counted in current window
+int      g_TicksWindow = 0;     // Total directional ticks counted (triggers reset at 30)
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -199,6 +232,18 @@ int OnInit()
    g_L3LastTime         = 0;
    g_L23LossCooldownEnd = 0;
 
+   // Reset V15 drawdown circuit breaker state
+   g_PeakBalance    = AccountInfoDouble(ACCOUNT_BALANCE);
+   g_DDHaltUntil    = 0;
+   g_DayOpenBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   g_DayOpenTime    = 0;   // properly initialised on the first tick call
+
+   // Reset V15 tick momentum state
+   g_LastTickBid = 0.0;
+   g_TicksBull   = 0;
+   g_TicksBear   = 0;
+   g_TicksWindow = 0;
+
    return(INIT_SUCCEEDED);
 }
 
@@ -217,9 +262,11 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   UpdateTickMomentum();          // V15: first – update rolling tick-direction counters at lowest latency
    ManageHFTExits();
-   CheckReentryArm();   // detect stop-outs; arm second-chance re-entry
+   CheckReentryArm();             // detect stop-outs; arm second-chance re-entry
 
+   if(IsGlobalStopped()) return;  // V15: circuit breaker – blocks new entries, exits still managed above
    if(!IsTradingTime()) return;
    if(DailyLimitsReached()) return;
    if(PositionsTotal() > 0) return;
@@ -326,6 +373,8 @@ void OnTick()
       if(IsLargeCandle())                                      { StorePending(1, scoreRisk); return; }
       if(adx < InpADXDelayMin)                                 { StorePending(1, scoreRisk); return; }
       if(!IsEntryLocationOK(ORDER_TYPE_BUY, Ask))              { StorePending(1, scoreRisk); return; }
+      // V15: tick-level multi-scenario gate – defer when tick momentum AND forming bar both contradict
+      if(!IsSignalAlignedWithTick(ORDER_TYPE_BUY))             { StorePending(1, scoreRisk); return; }
 
       ExecuteHFTOrder(ORDER_TYPE_BUY, Ask, slPoints, scoreRisk);
       ClearPending();
@@ -362,6 +411,8 @@ void OnTick()
       if(IsLargeCandle())                                       { StorePending(-1, scoreRisk); return; }
       if(adx < InpADXDelayMin)                                  { StorePending(-1, scoreRisk); return; }
       if(!IsEntryLocationOK(ORDER_TYPE_SELL, Bid))              { StorePending(-1, scoreRisk); return; }
+      // V15: tick-level multi-scenario gate – defer when tick momentum AND forming bar both contradict
+      if(!IsSignalAlignedWithTick(ORDER_TYPE_SELL))             { StorePending(-1, scoreRisk); return; }
 
       ExecuteHFTOrder(ORDER_TYPE_SELL, Bid, slPoints, scoreRisk);
       ClearPending();
@@ -685,6 +736,10 @@ bool TryPendingEntry(double Ask, double Bid)
    if(adxArr[1] < InpADXDelayMin) return false;   // ADX still forming
    if(IsLargeCandle())            return false;   // still after large candle
 
+   // V15: tick-level check on every retry tick – only execute when real-time flow agrees
+   ENUM_ORDER_TYPE pendType = (g_PendingDir == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   if(!IsSignalAlignedWithTick(pendType)) return false;
+
    double slPoints = InpStopLossPips * InpPipMultiplier;
 
    if(g_PendingDir == 1)   // BUY pending
@@ -794,6 +849,10 @@ bool TryReentry(double Ask, double Bid)
 
    // Stricter ADX confirmation required for re-entry
    if(adx < 20.0 || !adxRising) return false;
+
+   // V15: tick-level confirmation for re-entry – same gate as primary signals
+   ENUM_ORDER_TYPE retryType = (g_ReentryDir == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   if(!IsSignalAlignedWithTick(retryType)) return false;
 
    double close1 = iClose(_Symbol, _Period, 1);
    double open1  = iOpen(_Symbol, _Period, 1);
@@ -930,4 +989,135 @@ bool IsL23SniperAllowed(ENUM_ORDER_TYPE type, double scoreRisk)
    if(!HasCleanSniperCandle(type)) return false;
 
    return true;
+}
+
+//+------------------------------------------------------------------+
+//| V15 – Drawdown Circuit Breaker                                   |
+//| Tracks peak closed balance and day-open balance; blocks new      |
+//| entries when either DD limit is breached.  Open positions are    |
+//| never affected – ManageHFTExits() always runs before this check. |
+//+------------------------------------------------------------------+
+bool IsGlobalStopped()
+{
+   if(!InpUseDDProtection) return false;
+
+   double   balance    = AccountInfoDouble(ACCOUNT_BALANCE);
+   datetime todayStart = iTime(_Symbol, PERIOD_D1, 0);
+   if(todayStart == 0) return false;   // bars not yet loaded on startup
+
+   // Update all-time peak closed balance
+   if(balance > g_PeakBalance) g_PeakBalance = balance;
+
+   // Initialise or roll the day-open balance at each new trading day
+   if(g_DayOpenTime == 0 || todayStart > g_DayOpenTime)
+   {
+      g_DayOpenBalance = balance;
+      g_DayOpenTime    = todayStart;
+   }
+
+   // If an active halt is in place, check whether it has expired
+   if(g_DDHaltUntil > 0)
+   {
+      if(TimeCurrent() < g_DDHaltUntil) return true;
+      g_DDHaltUntil = 0;   // halt expired – resume trading
+   }
+
+   // Peak drawdown breach
+   if(g_PeakBalance > 0.0)
+   {
+      double ddPct = (g_PeakBalance - balance) / g_PeakBalance * 100.0;
+      if(ddPct >= InpMaxPeakDDPct)
+      {
+         PrintFormat("V15 Peak DD Halt: %.1f%% drop from $%.2f → freeze %d h",
+                     ddPct, g_PeakBalance, InpDDHaltHours);
+         g_DDHaltUntil = TimeCurrent() + (long)InpDDHaltHours * 3600;
+         return true;
+      }
+   }
+
+   // Daily loss breach
+   if(g_DayOpenBalance > 0.0)
+   {
+      double dayLossPct = (g_DayOpenBalance - balance) / g_DayOpenBalance * 100.0;
+      if(dayLossPct >= InpMaxDailyLossPct)
+      {
+         PrintFormat("V15 Daily Loss Halt: %.1f%% → freeze until EOD", dayLossPct);
+         g_DDHaltUntil = todayStart + 86400;   // until next calendar day
+         return true;
+      }
+   }
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| V15 – Tick-Level Momentum Engine                                 |
+//+------------------------------------------------------------------+
+
+// Called as the very first instruction in OnTick() for minimum latency.
+// Maintains a rolling 30-tick window of up/down price movements.
+void UpdateTickMomentum()
+{
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(g_LastTickBid > 0.0)
+   {
+      if(bid > g_LastTickBid + _Point)      g_TicksBull++;
+      else if(bid < g_LastTickBid - _Point) g_TicksBear++;
+      g_TicksWindow++;
+      if(g_TicksWindow >= 30)   // reset rolling window
+      {
+         g_TicksBull   = 0;
+         g_TicksBear   = 0;
+         g_TicksWindow = 0;
+      }
+   }
+   g_LastTickBid = bid;
+}
+
+// Returns +1 (bullish bias), -1 (bearish bias), 0 (neutral / not enough data).
+// Threshold: 62.5% of directional ticks must agree to declare a bias.
+int TickMomentumBias()
+{
+   int total = g_TicksBull + g_TicksBear;
+   if(total < 10) return 0;   // need at least 10 directional ticks to judge
+   double ratio = (double)(g_TicksBull - g_TicksBear) / total;
+   if(ratio >  0.25) return  1;   // ≥62.5 % up-ticks → bullish
+   if(ratio < -0.25) return -1;   // ≥62.5 % down-ticks → bearish
+   return 0;
+}
+
+// True when the forming bar[0] body does NOT strongly contradict the intended direction.
+// A body exceeding 25% of prior ATR in the opposite direction counts as "contrary".
+bool IsCurrentBarAligned(ENUM_ORDER_TYPE type)
+{
+   double open0 = iOpen(_Symbol, _Period, 0);
+   if(open0 == 0.0) return true;   // bar[0] not yet formed
+
+   double atrData[];
+   ArraySetAsSeries(atrData, true);
+   if(CopyBuffer(handleATR, 0, 0, 2, atrData) < 2) return true;
+
+   double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double body0 = bid - open0;            // positive → bar forming bullish
+   double limit = atrData[1] * 0.25;      // 25% of prior ATR = "strong" contrary move
+
+   if(type == ORDER_TYPE_BUY  && body0 < -limit) return false;   // bar forming bearish
+   if(type == ORDER_TYPE_SELL && body0 >  limit)  return false;   // bar forming bullish
+   return true;
+}
+
+// Combined V15 tick gate applied at every signal decision point.
+// Entry is deferred (→ pending retry) ONLY when BOTH conditions are simultaneously wrong:
+//   (a) rolling tick momentum is contrary to the signal direction, AND
+//   (b) the forming bar[0] body is also contrary.
+// Using AND preserves overall trade count while eliminating high-confidence wrong-direction entries.
+bool IsSignalAlignedWithTick(ENUM_ORDER_TYPE type)
+{
+   int  bias       = TickMomentumBias();
+   bool tickOK     = !((type == ORDER_TYPE_BUY  && bias == -1) ||
+                       (type == ORDER_TYPE_SELL && bias ==  1));
+   bool barAligned = IsCurrentBarAligned(type);
+
+   // Allow entry if EITHER tick momentum OR forming bar is aligned with the signal
+   return (tickOK || barAligned);
 }
