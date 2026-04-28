@@ -236,7 +236,7 @@ int OnInit()
    g_PeakBalance    = AccountInfoDouble(ACCOUNT_BALANCE);
    g_DDHaltUntil    = 0;
    g_DayOpenBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-   g_DayOpenTime    = 0;   // properly initialised on the first tick call
+   g_DayOpenTime    = 0;   // properly initialized on the first tick call
 
    // Reset V15 tick momentum state
    g_LastTickBid = 0.0;
@@ -1097,8 +1097,12 @@ bool IsCurrentBarAligned(ENUM_ORDER_TYPE type)
    ArraySetAsSeries(atrData, true);
    if(CopyBuffer(handleATR, 0, 0, 2, atrData) < 2) return true;
 
-   double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double body0 = bid - open0;            // positive → bar forming bullish
+   // Use the actual entry-side price: Ask for BUY entries, Bid for SELL entries.
+   // This ensures the body check reflects the exact price we would execute at.
+   double currentPrice = (type == ORDER_TYPE_BUY)
+                         ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                         : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double body0 = currentPrice - open0;   // positive → bar forming bullish
    double limit = atrData[1] * 0.25;      // 25% of prior ATR = "strong" contrary move
 
    if(type == ORDER_TYPE_BUY  && body0 < -limit) return false;   // bar forming bearish
