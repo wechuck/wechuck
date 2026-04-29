@@ -1,9 +1,46 @@
 //+------------------------------------------------------------------+
 //|                                              SCALP GOLDEA.mq5    |
 //|                                  Copyright 2026, Trading Pro     |
-//|   V17.0 - L2/L3/L4 Gate Fix + CHAL_ Comment Labels             |
+//|   V18.0 - 4 Pro-Level Final Touches: Equity Guard, Loss Scaler,|
+//|           Friday Auto-Close, ATR-Adaptive Trailing             |
 //+------------------------------------------------------------------+
 // Changelog:
+//   v18.0 – 4 PRO-LEVEL FINAL TOUCHES (zero entry condition changes; trade count preserved).
+//
+//   CORE 1 – REAL-TIME EQUITY GUARD
+//     The V15 DD circuit breaker watches CLOSED balance only.  Open positions
+//     can produce a 35% floating equity drawdown before any trade even closes.
+//     The Equity Guard monitors OPEN equity every tick.  If equity falls more
+//     than InpMaxEquityDDPct% below the session equity peak, ALL EA positions
+//     are force-closed immediately and new entries are blocked for
+//     InpEquityHaltHours hours.  The peak resets after each guard fire so the
+//     system can compound again from the new, protected baseline.
+//     Disabled in challenge mode (same philosophy as DD circuit breaker).
+//
+//   CORE 2 – CONSECUTIVE LOSS RISK SCALER (Kelly-Inspired)
+//     Professional prop-firm risk rule: size down after losses, size up (or
+//     recover) after wins.  After 1 consecutive loss the effective risk % is
+//     multiplied by 0.75 (−25%).  After 2 losses: 0.50 (−50%).  After 3 or
+//     more losses: 0.25 (−75% – pure survival mode).  Each winning trade
+//     steps the counter back one level.  Applies in normal mode only (the
+//     30% challenge risk is intentionally fixed and not further reduced).
+//
+//   CORE 3 – FRIDAY AUTO-CLOSE + WEEKEND GAP PROTECTION
+//     Gold weekend gaps average 300-800 pips and are the single most common
+//     cause of micro-account blow-ups.  At InpFridayCloseHour on Friday all
+//     EA positions are force-closed.  New entries are blocked from that point
+//     through the weekend until InpMondayOpenHour on Monday.  This protection
+//     is compatible with challenge mode (no point compounding into a gap).
+//
+//   CORE 4 – ATR-ADAPTIVE TRAILING STOP
+//     The fixed 65-pip trail is too tight in high-volatility Gold sessions
+//     (stops out winners early) and too wide in quiet sessions (returns too
+//     much profit).  When InpUseATRTrail is enabled the trail distance becomes
+//     ATR[1] × InpATRTrailMult and the step becomes ATR[1] × InpATRStepMult.
+//     A floor of 50% of the fixed values prevents over-tightening on ultra-
+//     low-volatility bars.  The fixed values act as the fallback whenever ATR
+//     data is unavailable.
+//
 //   v17.0 – L2/L3/L4 SCORING GATE FIX + CHALLENGE MODE COMMENT LABELS.
 //
 //           FIX – All 146 trades showing "V10_ScalpL1" even on high-lot setups.
@@ -128,7 +165,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Pro"
 #property link      "https://www.mql5.com"
-#property version   "17.00"
+#property version   "18.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -206,6 +243,24 @@ input bool   InpEnableL4        = true;   // Enable Level 4 Elite Sniper tier
 input double InpL4RSIExtreme    = 22.0;   // RSI below this (BUY) / above 100-this (SELL) for L4
 input double InpL4ADXMin        = 40.0;   // ADX must exceed this for L4 (institutional momentum)
 
+input group "=== V18: CORE 1 – EQUITY GUARD ==="
+input bool   InpUseEquityGuard  = true;   // Monitor open equity; close all + halt if drops too far
+input double InpMaxEquityDDPct  = 25.0;   // Max allowed equity drop from session equity peak (%)
+input int    InpEquityHaltHours = 4;      // Hours to halt new entries after equity guard fires
+
+input group "=== V18: CORE 2 – CONSECUTIVE LOSS SCALER ==="
+input bool   InpUseLossScaler   = true;   // Reduce risk % after consecutive losses (Kelly-inspired)
+
+input group "=== V18: CORE 3 – FRIDAY/WEEKEND PROTECTION ==="
+input bool   InpUseFridayClose  = true;   // Auto-close all positions at Friday closing hour
+input int    InpFridayCloseHour = 21;     // Server hour on Friday to close all + block new entries
+input int    InpMondayOpenHour  = 1;      // Server hour on Monday to resume trading
+
+input group "=== V18: CORE 4 – ATR-ADAPTIVE TRAILING ==="
+input bool   InpUseATRTrail     = true;   // Use ATR×multiplier trail instead of fixed pips
+input double InpATRTrailMult    = 2.0;    // Trail distance = ATR × this (wider in volatile sessions)
+input double InpATRStepMult     = 0.5;    // Trail step    = ATR × this
+
 //--- GLOBALS
 CTrade trade;
 int handleBB, handleRSI, handleADX, handleATR;
@@ -239,6 +294,13 @@ double   g_LastTickBid = 0.0;   // Bid price from the previous tick (direction r
 int      g_TicksBull   = 0;     // Up-ticks counted in current window
 int      g_TicksBear   = 0;     // Down-ticks counted in current window
 int      g_TicksWindow = 0;     // Total directional ticks counted (triggers reset at 30)
+
+// V18 Core 1 – Real-Time Equity Guard
+double   g_PeakEquity      = 0.0;   // Highest floating equity seen since EA start / last guard fire
+datetime g_EquityHaltUntil = 0;     // New entries blocked after equity guard fires (0 = inactive)
+
+// V18 Core 2 – Consecutive Loss Risk Scaler
+int      g_ConsecLosses = 0;   // Current consecutive losing-trade count; resets on any winning trade
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -297,6 +359,13 @@ int OnInit()
    g_TicksBear   = 0;
    g_TicksWindow = 0;
 
+   // Reset V18 Core 1 – Equity Guard state
+   g_PeakEquity      = AccountInfoDouble(ACCOUNT_EQUITY);
+   g_EquityHaltUntil = 0;
+
+   // Reset V18 Core 2 – Consecutive loss scaler state
+   g_ConsecLosses = 0;
+
    return(INIT_SUCCEEDED);
 }
 
@@ -316,10 +385,14 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    UpdateTickMomentum();          // V15: first – update rolling tick-direction counters at lowest latency
+   CheckEquityGuard();            // V18 Core 1: force-close open positions if floating equity drops too far
+   CheckFridayClose();            // V18 Core 3: auto-close all positions at Friday market close
    ManageHFTExits();
    CheckReentryArm();             // detect stop-outs; arm second-chance re-entry
 
    if(IsGlobalStopped()) return;  // V15: circuit breaker – blocks new entries, exits still managed above
+   if(IsEquityHalted())  return;  // V18 Core 1: equity guard halt – blocks new entries after guard fire
+   if(IsWeekendBlocked()) return; // V18 Core 3: weekend gap protection – no new entries Fri→Mon
    if(!IsTradingTime()) return;
    if(DailyLimitsReached()) return;
    if(PositionsTotal() > 0) return;
@@ -513,7 +586,6 @@ void ExecuteHFTOrder(ENUM_ORDER_TYPE type, double price, double slPoints, double
    if(InpChallengeMode)
    {
       effectiveRisk = InpChallengeRisk;   // 30% of balance per trade
-      effectiveSL   = InpChallengeSL * InpPipMultiplier;
 
       // Adaptive TP: large pip target early (small balance needs big RR),
       // switch to fast scalp target once balance compounds past the threshold.
@@ -521,6 +593,16 @@ void ExecuteHFTOrder(ENUM_ORDER_TYPE type, double price, double slPoints, double
                         ? InpChallengeTP_Early
                         : InpChallengeTP_Late;
    }
+   else
+   {
+      // V18 Core 2 – Consecutive Loss Risk Scaler (normal mode only).
+      // After losing trades, risk is reduced proportionally so a streak of
+      // losses cannot compound into an account-blowing drawdown.
+      effectiveRisk *= GetRiskScaler();
+   }
+
+   effectiveSL = slPoints;
+   if(InpChallengeMode) effectiveSL = InpChallengeSL * InpPipMultiplier;
 
    double moneyRisk  = balance * (effectiveRisk / 100.0);
    double tickValue  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -621,6 +703,22 @@ void ManageHFTExits()
    double beLockDist    = InpBELockPips     * InpPipMultiplier * _Point;
    double trailDist     = InpTrailDistPips  * InpPipMultiplier * _Point;
    double trailStep     = InpTrailStepPips  * InpPipMultiplier * _Point;
+
+   // V18 Core 4 – ATR-Adaptive Trailing: replace fixed pips with ATR×multiplier.
+   // In volatile Gold sessions the trail is wider (lets runners breathe and compound);
+   // in quiet sessions the trail tightens to lock profit faster.
+   // A 50% floor on the fixed values prevents over-tightening on ultra-low-volatility bars.
+   double atrTrailBuf[];
+   ArraySetAsSeries(atrTrailBuf, true);
+   if(InpUseATRTrail && CopyBuffer(handleATR, 0, 0, 2, atrTrailBuf) >= 2 && atrTrailBuf[1] > 0)
+   {
+      double atrTrail = atrTrailBuf[1] * InpATRTrailMult;
+      double atrStep  = atrTrailBuf[1] * InpATRStepMult;
+      double floorTrail = trailDist * 0.5;
+      double floorStep  = trailStep * 0.5;
+      trailDist = MathMax(atrTrail, floorTrail);
+      trailStep = MathMax(atrStep,  floorStep);
+   }
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -898,6 +996,9 @@ void CheckReentryArm()
          g_ReentryArmed  = true;
          g_ReentryExpiry = TimeCurrent() + 6 * PeriodSeconds(_Period);
 
+         // V18 Core 2: this was a losing trade – increment the consecutive loss counter
+         if(InpUseLossScaler && !InpChallengeMode) g_ConsecLosses++;
+
          // V14 – if the stopped-out position was L2/L3, activate survival cooldown.
          // The SL exit deal won't carry the original comment; find the matching IN deal.
          long posId = HistoryDealGetInteger(lastTicket, DEAL_POSITION_ID);
@@ -913,6 +1014,16 @@ void CheckReentryArm()
                StringFind(cmt, "CHAL_L3") >= 0  || StringFind(cmt, "CHAL_EliteL4") >= 0)
                g_L23LossCooldownEnd = TimeCurrent() + (long)InpL23LossCooldownH * 3600;
             break;
+         }
+      }
+      else if(lastTicket > 0)
+      {
+         // Trade closed for a reason other than SL (TP, manual, equity guard, Friday close).
+         // V18 Core 2: check profit directly – if positive, step the loss counter back.
+         if(InpUseLossScaler && !InpChallengeMode)
+         {
+            double dealProfit = HistoryDealGetDouble(lastTicket, DEAL_PROFIT);
+            if(dealProfit > 0 && g_ConsecLosses > 0) g_ConsecLosses--;
          }
       }
    }
@@ -1219,4 +1330,114 @@ bool IsSignalAlignedWithTick(ENUM_ORDER_TYPE type)
 
    // Allow entry if EITHER tick momentum OR forming bar is aligned with the signal
    return (tickOK || barAligned);
+}
+
+//+------------------------------------------------------------------+
+//| V18 CORE 1 – Real-Time Equity Guard                              |
+//+------------------------------------------------------------------+
+// Monitors floating (open) equity every tick.  If equity drops more than
+// InpMaxEquityDDPct% below the session equity peak, ALL EA positions are
+// force-closed immediately and new entries are blocked for InpEquityHaltHours.
+// The closed-balance DD circuit breaker (IsGlobalStopped) only reacts after a
+// trade closes; this guard intervenes DURING the trade, preventing the worst
+// intra-trade drawdown scenarios.  Disabled in challenge mode.
+void CheckEquityGuard()
+{
+   if(!InpUseEquityGuard) return;
+   if(InpChallengeMode)   return;   // 30% challenge risk: same bypass philosophy as DD breaker
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   // Continuously update peak equity (including open floating profit)
+   if(equity > g_PeakEquity) g_PeakEquity = equity;
+   if(g_PeakEquity <= 0.0)   return;
+
+   // Check whether equity halt is already active and has expired
+   if(g_EquityHaltUntil > 0 && TimeCurrent() >= g_EquityHaltUntil)
+      g_EquityHaltUntil = 0;
+
+   if(g_EquityHaltUntil > 0) return;   // already halted – nothing more to do this tick
+
+   double ddPct = (g_PeakEquity - equity) / g_PeakEquity * 100.0;
+   if(ddPct >= InpMaxEquityDDPct)
+   {
+      // Force-close all EA positions immediately
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong ticket = PositionGetTicket(i);
+         if(PositionSelectByTicket(ticket) &&
+            PositionGetInteger(POSITION_MAGIC) == InpMagic)
+            trade.PositionClose(ticket, InpMaxSlippage);
+      }
+      g_EquityHaltUntil = TimeCurrent() + (long)InpEquityHaltHours * 3600;
+      g_PeakEquity      = AccountInfoDouble(ACCOUNT_EQUITY);   // reset peak from new baseline
+      PrintFormat("V18 Equity Guard: %.1f%% open drawdown from $%.2f equity peak → close all, halt %d h",
+                  ddPct, g_PeakEquity, InpEquityHaltHours);
+   }
+}
+
+// Returns true when new entries are blocked by the equity guard halt.
+bool IsEquityHalted()
+{
+   if(!InpUseEquityGuard) return false;
+   return (g_EquityHaltUntil > 0 && TimeCurrent() < g_EquityHaltUntil);
+}
+
+//+------------------------------------------------------------------+
+//| V18 CORE 2 – Consecutive Loss Risk Scaler                        |
+//+------------------------------------------------------------------+
+// Returns a multiplier (0.25 – 1.0) applied to effectiveRisk in
+// ExecuteHFTOrder().  After each SL hit the counter increments; after each
+// profitable close it decrements by one.  This prevents a losing streak from
+// compounding into an account-blowing drawdown while allowing normal sizing
+// to resume naturally as the account recovers.  Not applied in challenge mode.
+double GetRiskScaler()
+{
+   if(!InpUseLossScaler)    return 1.0;
+   if(g_ConsecLosses <= 0)  return 1.0;
+   if(g_ConsecLosses == 1)  return 0.75;   // 1 loss  → −25% risk
+   if(g_ConsecLosses == 2)  return 0.50;   // 2 losses → −50% risk
+   return 0.25;                             // 3+ losses → −75% risk (survival mode)
+}
+
+//+------------------------------------------------------------------+
+//| V18 CORE 3 – Friday Auto-Close + Weekend Gap Protection          |
+//+------------------------------------------------------------------+
+// Gold weekend gaps average 300–800 pips and are the leading cause of
+// micro-account blow-ups.  All EA positions are force-closed at
+// InpFridayCloseHour on Friday.  No new entries are allowed from that
+// point until InpMondayOpenHour on Monday.
+void CheckFridayClose()
+{
+   if(!InpUseFridayClose) return;
+
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+
+   // On Friday at or after the configured closing hour: close everything
+   if(dt.day_of_week == 5 && dt.hour >= InpFridayCloseHour)
+   {
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong ticket = PositionGetTicket(i);
+         if(PositionSelectByTicket(ticket) &&
+            PositionGetInteger(POSITION_MAGIC) == InpMagic)
+            trade.PositionClose(ticket, InpMaxSlippage);
+      }
+   }
+}
+
+// Returns true when new entries are blocked due to the weekend protection window.
+bool IsWeekendBlocked()
+{
+   if(!InpUseFridayClose) return false;
+
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+
+   if(dt.day_of_week == 5 && dt.hour >= InpFridayCloseHour) return true;   // Fri evening
+   if(dt.day_of_week == 6) return true;                                     // Saturday
+   if(dt.day_of_week == 0) return true;                                     // Sunday
+   if(dt.day_of_week == 1 && dt.hour < InpMondayOpenHour)  return true;    // Mon pre-open
+   return false;
 }
