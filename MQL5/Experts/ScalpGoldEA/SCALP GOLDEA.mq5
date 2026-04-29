@@ -276,7 +276,8 @@ input int    InpFridayCloseHour = 21;     // Server hour on Friday to close all 
 input int    InpMondayOpenHour  = 1;      // Server hour on Monday to resume trading
 
 input group "=== V19: MULTI-PAIR AUTO-CONFIG ==="
-input bool   InpAutoSymbolConfig = true;  // Auto-detect symbol (Gold/Forex) and set pip/spread/SL/TP params
+input bool   InpAutoSymbolConfig  = true;  // Auto-detect symbol (Gold/Forex) and set pip/spread/SL/TP params
+input string InpAllowedSymbols    = "XAUUSD,EURUSD,USDJPY,GBPUSD,AUDUSD,USDCAD,USDCHF,NZDUSD,EURGBP,EURJPY,GBPJPY"; // Comma-separated list of allowed symbols (empty = all)
 
 //--- GLOBALS
 CTrade trade;
@@ -322,21 +323,64 @@ int      g_ConsecLosses = 0;   // Current consecutive losing-trade count; resets
 // V19 – Multi-Pair Auto-Config: effective runtime parameters
 // Initialized in OnInit() from inputs (Gold defaults) or symbol-specific profile.
 // All execution/exit code references these globals so multi-pair works transparently.
-double g_PipMult;         // effective points-per-pip
-double g_SLPips;          // effective stop-loss (pips)
-double g_TPPips;          // effective take-profit (pips)
-double g_PartialTPPips;   // effective partial-TP distance (pips)
-double g_BETriggerPips;   // effective breakeven trigger (pips)
-double g_BELockPips;      // effective breakeven lock (pips)
-double g_TrailDistPips;   // effective trailing distance (pips)
-double g_TrailStepPips;   // effective trailing step (pips)
-int    g_MaxSpread;       // effective max allowed spread (points)
+double g_PipMult;             // effective points-per-pip
+double g_SLPips;              // effective stop-loss (pips)
+double g_TPPips;              // effective take-profit (pips)
+double g_PartialTPPips;       // effective partial-TP distance (pips)
+double g_BETriggerPips;       // effective breakeven trigger (pips)
+double g_BELockPips;          // effective breakeven lock (pips)
+double g_TrailDistPips;       // effective trailing distance (pips)
+double g_TrailStepPips;       // effective trailing step (pips)
+int    g_MaxSpread;           // effective max allowed spread (points)
+// V19.1 – per-symbol entry thresholds (these are the primary reason forex was unprofitable:
+// Gold RSI 35/65 and ADX 25/35 are never reached on M5 forex → zero trades fired).
+double g_RSIOversold;         // RSI below this → BUY signal (Gold: 35, Forex T1: 40, T2: 38–42)
+double g_RSIOverbought;       // RSI above this → SELL signal (Gold: 65, Forex T1: 60, T2: 58–62)
+double g_RSIStaleOversold;    // Pending BUY stale if RSI recovers above this (Gold: 42, Forex: +7)
+double g_RSIStaleOverbought;  // Pending SELL stale if RSI falls below this  (Gold: 58, Forex: −7)
+double g_ADXMedium;           // L2 score gate 1 (Gold: 25, Forex T1: 20, T2: 22)
+double g_ADXStrong;           // L3/L4 score gate 2 (Gold: 35, Forex T1: 28, T2: 30)
+double g_L4RSIExtreme;        // L4 Elite RSI ultra-extreme (Gold: 22, Forex T1: 27, T2: 26)
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   // V19.1 – Symbol allowlist guard.
+   // If InpAllowedSymbols is non-empty, check that the current chart symbol
+   // (exact match or prefix/suffix stripped broker suffix) is in the list.
+   // This prevents the EA from accidentally running on an unapproved instrument.
+   if(StringLen(InpAllowedSymbols) > 0)
+   {
+      string symUpper = _Symbol;
+      StringToUpper(symUpper);
+      string allowedUpper = InpAllowedSymbols;
+      StringToUpper(allowedUpper);
+
+      bool found = false;
+      string parts[];
+      int n = StringSplit(allowedUpper, ',', parts);
+      for(int k = 0; k < n; k++)
+      {
+         StringTrimLeft(parts[k]);
+         StringTrimRight(parts[k]);
+         // Match if the symbol contains the allowed name or vice-versa
+         // (handles broker suffixes like "EURUSDm", ".EURUSD", "EURUSD.pro")
+         if(StringFind(symUpper, parts[k]) >= 0 || StringFind(parts[k], symUpper) >= 0)
+         {
+            found = true;
+            break;
+         }
+      }
+      if(!found)
+      {
+         PrintFormat("V19 AllowList: %s is NOT in the allowed list (%s) – EA not started.",
+                     _Symbol, InpAllowedSymbols);
+         return(INIT_FAILED);
+      }
+   }
+
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(InpMaxSlippage);
    trade.SetTypeFilling(SYMBOL_FILLING_IOC);
@@ -505,7 +549,7 @@ void OnTick()
    // ======================================================
    // BUY SCORING ENGINE (entry conditions unchanged)
    // ======================================================
-   if(low1 <= bbLower[1] && rsi[1] < 35 && bullishCandle && strongBuyReversal)
+   if(low1 <= bbLower[1] && rsi[1] < g_RSIOversold && bullishCandle && strongBuyReversal)
    {
       double scoreRisk = InpRiskLevel1; // Default: Level 1 scalp
 
@@ -518,14 +562,14 @@ void OnTick()
       if(htfBullish)
       {
          int score = 0;
-         if(adx > 25) score++;      // Stricter ADX for higher levels
-         if(adx > 35) score++;      // Extreme momentum
+         if(adx > g_ADXMedium) score++;   // L2 momentum gate
+         if(adx > g_ADXStrong) score++;   // L3 extreme momentum gate
          if(adxRising) score++;
 
          if(score == 3)
          {
             // V16: L4 Elite Sniper – ultra-extreme RSI + institutional ADX + tick flow actively confirming
-            if(InpEnableL4 && rsi[1] < InpL4RSIExtreme &&
+            if(InpEnableL4 && rsi[1] < g_L4RSIExtreme &&
                adx > InpL4ADXMin && TickMomentumBias() == 1)
                scoreRisk = InpRiskLevel4;  // Elite tier (~95% win rate)
             else
@@ -556,7 +600,7 @@ void OnTick()
    // ======================================================
    // SELL SCORING ENGINE (entry conditions unchanged)
    // ======================================================
-   if(high1 >= bbUpper[1] && rsi[1] > 65 && bearishCandle && strongSellReversal)
+   if(high1 >= bbUpper[1] && rsi[1] > g_RSIOverbought && bearishCandle && strongSellReversal)
    {
       double scoreRisk = InpRiskLevel1; // Default: Level 1 scalp
 
@@ -565,14 +609,14 @@ void OnTick()
       if(htfBearish)
       {
          int score = 0;
-         if(adx > 25) score++;      // Stricter ADX
-         if(adx > 35) score++;      // Extreme momentum
+         if(adx > g_ADXMedium) score++;   // L2 momentum gate
+         if(adx > g_ADXStrong) score++;   // L3 extreme momentum gate
          if(adxRising) score++;
 
          if(score == 3)
          {
             // V16: L4 Elite Sniper – ultra-extreme RSI + institutional ADX + tick flow actively confirming
-            if(InpEnableL4 && rsi[1] > (100.0 - InpL4RSIExtreme) &&
+            if(InpEnableL4 && rsi[1] > (100.0 - g_L4RSIExtreme) &&
                adx > InpL4ADXMin && TickMomentumBias() == -1)
                scoreRisk = InpRiskLevel4;  // Elite tier (~95% win rate)
             else
@@ -948,7 +992,7 @@ bool TryPendingEntry(double Ask, double Bid)
    {
       // Signal is stale if price has rallied far above BB lower
       if(Ask > bbLower[1] + atrCheck[1] * 1.5) return false;
-      if(rsiArr[1] > 42)                        return false;   // no longer oversold
+      if(rsiArr[1] > g_RSIStaleOversold)        return false;   // no longer oversold
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_BUY)) return false;
       if(!IsEntryLocationOK(ORDER_TYPE_BUY, Ask))              return false;
 
@@ -960,7 +1004,7 @@ bool TryPendingEntry(double Ask, double Bid)
    {
       // Signal is stale if price has fallen far below BB upper
       if(Bid < bbUpper[1] - atrCheck[1] * 1.5) return false;
-      if(rsiArr[1] < 58)                        return false;   // no longer overbought
+      if(rsiArr[1] < g_RSIStaleOverbought)      return false;   // no longer overbought
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_SELL)) return false;
       if(!IsEntryLocationOK(ORDER_TYPE_SELL, Bid))              return false;
 
@@ -1087,7 +1131,7 @@ bool TryReentry(double Ask, double Bid)
    double slPoints = g_SLPips * g_PipMult;
 
    if(g_ReentryDir == 1 &&
-      low1 <= bbLower[1] && rsiArr[1] < 35 && bullishCandle && strongBuyReversal)
+      low1 <= bbLower[1] && rsiArr[1] < g_RSIOversold && bullishCandle && strongBuyReversal)
    {
       if(IsLargeCandle())                                          return false;
       if(!IsEntryLocationOK(ORDER_TYPE_BUY, Ask))                 return false;
@@ -1098,7 +1142,7 @@ bool TryReentry(double Ask, double Bid)
       return true;
    }
    if(g_ReentryDir == -1 &&
-      high1 >= bbUpper[1] && rsiArr[1] > 65 && bearishCandle && strongSellReversal)
+      high1 >= bbUpper[1] && rsiArr[1] > g_RSIOverbought && bearishCandle && strongSellReversal)
    {
       if(IsLargeCandle())                                          return false;
       if(!IsEntryLocationOK(ORDER_TYPE_SELL, Bid))                return false;
@@ -1476,15 +1520,23 @@ void InitSymbolProfile()
 {
    // Seed all effective params from the user inputs (Gold defaults).
    // If auto-config is off, or we're on Gold, these values are used directly.
-   g_PipMult       = InpPipMultiplier;
-   g_SLPips        = InpStopLossPips;
-   g_TPPips        = InpTakeProfitPips;
-   g_PartialTPPips = InpPartialTPPips;
-   g_BETriggerPips = InpBETriggerPips;
-   g_BELockPips    = InpBELockPips;
-   g_TrailDistPips = InpTrailDistPips;
-   g_TrailStepPips = InpTrailStepPips;
-   g_MaxSpread     = InpMaxSpread;
+   g_PipMult             = InpPipMultiplier;
+   g_SLPips              = InpStopLossPips;
+   g_TPPips              = InpTakeProfitPips;
+   g_PartialTPPips       = InpPartialTPPips;
+   g_BETriggerPips       = InpBETriggerPips;
+   g_BELockPips          = InpBELockPips;
+   g_TrailDistPips       = InpTrailDistPips;
+   g_TrailStepPips       = InpTrailStepPips;
+   g_MaxSpread           = InpMaxSpread;
+   // V19.1 – Gold entry thresholds (input defaults)
+   g_RSIOversold         = 35.0;   // Gold rarely drops further; large pip moves = extreme RSI
+   g_RSIOverbought       = 65.0;
+   g_RSIStaleOversold    = 42.0;   // pending BUY stale if RSI rises above here
+   g_RSIStaleOverbought  = 58.0;   // pending SELL stale if RSI falls below here
+   g_ADXMedium           = 25.0;   // L2 gate
+   g_ADXStrong           = 35.0;   // L3/L4 gate
+   g_L4RSIExtreme        = InpL4RSIExtreme;  // default 22 from input
 
    if(!InpAutoSymbolConfig)
    {
@@ -1498,8 +1550,9 @@ void InitSymbolProfile()
    // Gold / XAU: keep input defaults
    if(StringFind(sym, "XAU") >= 0 || StringFind(sym, "GOLD") >= 0)
    {
-      PrintFormat("V19 Auto-Config: GOLD profile (%s) – SL=%.0f TP=%.0f trail=%.0f maxSpread=%d",
-                  _Symbol, g_SLPips, g_TPPips, g_TrailDistPips, g_MaxSpread);
+      PrintFormat("V19 Auto-Config: GOLD profile (%s) – RSI<%0.f/>%0.f ADX>%.0f/%.0f SL=%.0f TP=%.0f trail=%.0f maxSpread=%d",
+                  _Symbol, g_RSIOversold, g_RSIOverbought, g_ADXMedium, g_ADXStrong,
+                  g_SLPips, g_TPPips, g_TrailDistPips, g_MaxSpread);
       return;
    }
 
@@ -1508,35 +1561,43 @@ void InitSymbolProfile()
    g_PipMult = 10.0;
 
    // ── TIER 1: Low-Spread Pairs ──────────────────────────────────────
-   // Recommended for HFT scalping: tight spread, high liquidity, well-tested
-   // Mean-reversion BB+RSI signals fire cleanly on these instruments.
+   // On M5 forex, RSI 35/65 is almost never reached → use 40/60.
+   // ADX 25/35 is also rarely hit on forex M5 → use 20/28 for L2/L3 gates.
    if(StringFind(sym, "EURUSD") >= 0)
    {
       // Tight, liquid, ideal for M5 mean reversion
       g_SLPips=15; g_TPPips=50; g_PartialTPPips=8;
       g_BETriggerPips=10; g_BELockPips=2;
       g_TrailDistPips=12; g_TrailStepPips=3; g_MaxSpread=15;
+      g_RSIOversold=40; g_RSIOverbought=60; g_RSIStaleOversold=47; g_RSIStaleOverbought=53;
+      g_ADXMedium=20; g_ADXStrong=28; g_L4RSIExtreme=27;
    }
    else if(StringFind(sym, "USDJPY") >= 0)
    {
-      // Tight spreads, strong trends; slightly more volatile than EURUSD
+      // Tight spreads, stronger trends than EUR/USD; slightly more volatile
       g_SLPips=15; g_TPPips=50; g_PartialTPPips=8;
       g_BETriggerPips=10; g_BELockPips=2;
       g_TrailDistPips=12; g_TrailStepPips=3; g_MaxSpread=15;
+      g_RSIOversold=39; g_RSIOverbought=61; g_RSIStaleOversold=47; g_RSIStaleOverbought=53;
+      g_ADXMedium=20; g_ADXStrong=28; g_L4RSIExtreme=27;
    }
    else if(StringFind(sym, "GBPUSD") >= 0)
    {
-      // Higher intraday range → wider SL/TP/trail to absorb GBP noise
+      // Higher intraday range → wider SL/TP/trail; RSI reaches extremes more readily
       g_SLPips=20; g_TPPips=60; g_PartialTPPips=10;
       g_BETriggerPips=12; g_BELockPips=3;
       g_TrailDistPips=15; g_TrailStepPips=4; g_MaxSpread=20;
+      g_RSIOversold=38; g_RSIOverbought=62; g_RSIStaleOversold=46; g_RSIStaleOverbought=54;
+      g_ADXMedium=20; g_ADXStrong=28; g_L4RSIExtreme=26;
    }
    else if(StringFind(sym, "AUDUSD") >= 0)
    {
-      // Commodity-correlated but tight; similar profile to EURUSD
+      // Commodity-correlated; similar volatility to EURUSD
       g_SLPips=15; g_TPPips=50; g_PartialTPPips=8;
       g_BETriggerPips=10; g_BELockPips=2;
       g_TrailDistPips=12; g_TrailStepPips=3; g_MaxSpread=15;
+      g_RSIOversold=40; g_RSIOverbought=60; g_RSIStaleOversold=47; g_RSIStaleOverbought=53;
+      g_ADXMedium=20; g_ADXStrong=28; g_L4RSIExtreme=27;
    }
    else if(StringFind(sym, "USDCAD") >= 0)
    {
@@ -1544,43 +1605,55 @@ void InitSymbolProfile()
       g_SLPips=18; g_TPPips=55; g_PartialTPPips=9;
       g_BETriggerPips=11; g_BELockPips=2;
       g_TrailDistPips=13; g_TrailStepPips=3; g_MaxSpread=20;
+      g_RSIOversold=40; g_RSIOverbought=60; g_RSIStaleOversold=47; g_RSIStaleOverbought=53;
+      g_ADXMedium=20; g_ADXStrong=28; g_L4RSIExtreme=27;
    }
    else if(StringFind(sym, "USDCHF") >= 0)
    {
-      // Safe-haven flows can spike; same profile as USDCAD
+      // Safe-haven flows; similar to USDCAD
       g_SLPips=18; g_TPPips=55; g_PartialTPPips=9;
       g_BETriggerPips=11; g_BELockPips=2;
       g_TrailDistPips=13; g_TrailStepPips=3; g_MaxSpread=20;
+      g_RSIOversold=40; g_RSIOverbought=60; g_RSIStaleOversold=47; g_RSIStaleOverbought=53;
+      g_ADXMedium=20; g_ADXStrong=28; g_L4RSIExtreme=27;
    }
    else if(StringFind(sym, "NZDUSD") >= 0)
    {
-      // Lowest daily range of majors → tighter params
+      // Lowest daily range of majors → tighter params; needs widest RSI gate
       g_SLPips=12; g_TPPips=45; g_PartialTPPips=7;
       g_BETriggerPips=8; g_BELockPips=2;
       g_TrailDistPips=10; g_TrailStepPips=3; g_MaxSpread=20;
+      g_RSIOversold=41; g_RSIOverbought=59; g_RSIStaleOversold=48; g_RSIStaleOverbought=52;
+      g_ADXMedium=19; g_ADXStrong=27; g_L4RSIExtreme=28;
    }
    // ── TIER 2: Moderate Pairs ────────────────────────────────────────
    // Wider spreads or noisier price action; EA still works but less ideal.
    else if(StringFind(sym, "EURGBP") >= 0)
    {
-      // Low-volatility cross; very slow movement → tight params, wider spread ok
+      // Very low volatility cross; RSI rarely leaves the 40-60 band → use 42/58
       g_SLPips=10; g_TPPips=35; g_PartialTPPips=6;
       g_BETriggerPips=7; g_BELockPips=1;
       g_TrailDistPips=8; g_TrailStepPips=2; g_MaxSpread=20;
+      g_RSIOversold=42; g_RSIOverbought=58; g_RSIStaleOversold=49; g_RSIStaleOverbought=51;
+      g_ADXMedium=18; g_ADXStrong=25; g_L4RSIExtreme=30;
    }
    else if(StringFind(sym, "EURJPY") >= 0)
    {
-      // Euro-Yen crosses with higher range; moderate spread
+      // EUR/JPY cross; more range than EURGBP, wider thresholds
       g_SLPips=20; g_TPPips=65; g_PartialTPPips=10;
       g_BETriggerPips=12; g_BELockPips=3;
       g_TrailDistPips=15; g_TrailStepPips=4; g_MaxSpread=25;
+      g_RSIOversold=38; g_RSIOverbought=62; g_RSIStaleOversold=46; g_RSIStaleOverbought=54;
+      g_ADXMedium=22; g_ADXStrong=30; g_L4RSIExtreme=26;
    }
    else if(StringFind(sym, "GBPJPY") >= 0)
    {
-      // Most volatile cross listed; wide trail needed to survive GBP+JPY spikes
+      // Most volatile cross; large spikes → widest SL/trail; RSI reaches extremes readily
       g_SLPips=28; g_TPPips=90; g_PartialTPPips=15;
       g_BETriggerPips=17; g_BELockPips=4;
       g_TrailDistPips=20; g_TrailStepPips=5; g_MaxSpread=40;
+      g_RSIOversold=37; g_RSIOverbought=63; g_RSIStaleOversold=45; g_RSIStaleOverbought=55;
+      g_ADXMedium=22; g_ADXStrong=30; g_L4RSIExtreme=25;
    }
    else
    {
@@ -1588,11 +1661,12 @@ void InitSymbolProfile()
       g_SLPips=20; g_TPPips=60; g_PartialTPPips=10;
       g_BETriggerPips=12; g_BELockPips=3;
       g_TrailDistPips=15; g_TrailStepPips=4; g_MaxSpread=25;
+      g_RSIOversold=40; g_RSIOverbought=60; g_RSIStaleOversold=47; g_RSIStaleOverbought=53;
+      g_ADXMedium=20; g_ADXStrong=28; g_L4RSIExtreme=27;
       PrintFormat("V19 Auto-Config: UNKNOWN symbol %s – generic Forex profile applied", _Symbol);
    }
 
-   PrintFormat("V19 Auto-Config: %s profile – SL=%.0f TP=%.0f partial=%.0f BE=%0.f lock=%.0f trail=%.0f/%.0f maxSpread=%d",
-               _Symbol, g_SLPips, g_TPPips, g_PartialTPPips,
-               g_BETriggerPips, g_BELockPips,
-               g_TrailDistPips, g_TrailStepPips, g_MaxSpread);
+   PrintFormat("V19 Auto-Config: %s profile – RSI<%.0f/>%.0f ADX>%.0f/%.0f SL=%.0f TP=%.0f trail=%.0f/%.0f maxSpread=%d",
+               _Symbol, g_RSIOversold, g_RSIOverbought, g_ADXMedium, g_ADXStrong,
+               g_SLPips, g_TPPips, g_TrailDistPips, g_TrailStepPips, g_MaxSpread);
 }
