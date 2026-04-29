@@ -1,9 +1,30 @@
 //+------------------------------------------------------------------+
 //|                                              SCALP GOLDEA.mq5    |
 //|                                  Copyright 2026, Trading Pro     |
-//|   V16.0 - L4 Elite Sniper + Challenge Mode DD Fix               |
+//|   V17.0 - L2/L3/L4 Gate Fix + CHAL_ Comment Labels             |
 //+------------------------------------------------------------------+
 // Changelog:
+//   v17.0 – L2/L3/L4 SCORING GATE FIX + CHALLENGE MODE COMMENT LABELS.
+//
+//           FIX – All 146 trades showing "V10_ScalpL1" even on high-lot setups.
+//           Root cause: the L2/L3/L4 upgrade gate was `bullishTrend && htfBullish`
+//           for BUY (and `bearishTrend && htfBearish` for SELL).  This EA signals
+//           at REVERSAL points (lower BB / upper BB).  At the exact moment of a
+//           lower-BB buy signal, price has been falling so M5 DI- always dominates
+//           → bullishTrend is permanently false → L2/L3/L4 can never score.
+//           FIX: gate is now `htfBullish` / `htfBearish` only (H4 macro trend).
+//           The H4 EMA50/200 filter correctly confirms the long-term direction
+//           without contradicting the short-term reversal nature of the entry.
+//           TRADE COUNT IS UNCHANGED – entry conditions are not touched; only
+//           the lot-size scoring path can now reach L2/L3/L4 when H4 aligns.
+//           Survival mode (weekly/daily caps, cooldowns) still demotes to L1
+//           when limits are reached, so no new trades are ever added.
+//
+//           FIX – Challenge mode comment labels: all challenge-mode trades now
+//           use "CHAL_L1/L2/L3/EliteL4" prefix so the user can immediately see
+//           that the large lot is driven by the 30% challenge risk, not a scoring
+//           mistake, and which signal quality level was scored.
+//
 //   v16.0 – L4 ELITE SNIPER TIER + CHALLENGE MODE FIX built on V15.0.
 //
 //           FIX – Challenge Mode vs DD Circuit Breaker conflict: when
@@ -107,7 +128,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Pro"
 #property link      "https://www.mql5.com"
-#property version   "16.00"
+#property version   "17.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -382,8 +403,13 @@ void OnTick()
    {
       double scoreRisk = InpRiskLevel1; // Default: Level 1 scalp
 
-      // SNIPER UPGRADE: Level 2/3 only when 4-Hour trend aligns perfectly
-      if(bullishTrend && htfBullish)
+      // SNIPER UPGRADE: Level 2/3/4 when H4 macro trend aligns with signal direction.
+      // V17 FIX: bullishTrend (M5 DI) was removed from the gate – at a lower-BB reversal
+      // candle price has been falling, so M5 DI- always dominates at the exact moment of
+      // entry, making the old `bullishTrend && htfBullish` condition permanently false and
+      // blocking all L2/L3/L4 upgrades.  The H4 EMA gate alone is the correct macro filter
+      // for a mean-reversion EA.  Trade count is unaffected (entry conditions unchanged).
+      if(htfBullish)
       {
          int score = 0;
          if(adx > 25) score++;      // Stricter ADX for higher levels
@@ -428,8 +454,9 @@ void OnTick()
    {
       double scoreRisk = InpRiskLevel1; // Default: Level 1 scalp
 
-      // SNIPER UPGRADE: Level 2/3 only when 4-Hour trend aligns perfectly
-      if(bearishTrend && htfBearish)
+      // SNIPER UPGRADE: Level 2/3/4 when H4 macro trend aligns with signal direction.
+      // V17 FIX: bearishTrend (M5 DI) removed – see BUY engine comment above.
+      if(htfBearish)
       {
          int score = 0;
          if(adx > 25) score++;      // Stricter ADX
@@ -546,14 +573,22 @@ void ExecuteHFTOrder(ENUM_ORDER_TYPE type, double price, double slPoints, double
 
    double sl, tp;
    string comment;
-   if(assignedRisk >= InpRiskLevel4)
-      comment = "V16_EliteL4";
-   else if(assignedRisk >= InpRiskLevel3)
-      comment = "V10_SniperL3";
-   else if(assignedRisk >= InpRiskLevel2)
-      comment = "V10_SniperL2";
+   if(InpChallengeMode)
+   {
+      // Challenge mode: prefix "CHAL_" so the user can instantly see that the lot
+      // size is driven by the 30% challenge risk, not the signal scoring level.
+      if(assignedRisk >= InpRiskLevel4)      comment = "CHAL_EliteL4";
+      else if(assignedRisk >= InpRiskLevel3) comment = "CHAL_L3";
+      else if(assignedRisk >= InpRiskLevel2) comment = "CHAL_L2";
+      else                                   comment = "CHAL_L1";
+   }
    else
-      comment = "V10_ScalpL1";
+   {
+      if(assignedRisk >= InpRiskLevel4)      comment = "V16_EliteL4";
+      else if(assignedRisk >= InpRiskLevel3) comment = "V10_SniperL3";
+      else if(assignedRisk >= InpRiskLevel2) comment = "V10_SniperL2";
+      else                                   comment = "V10_ScalpL1";
+   }
 
    // V14 – record L3 activation time for inter-trade cooling enforcement
    if(assignedRisk >= InpRiskLevel3)
@@ -873,7 +908,9 @@ void CheckReentryArm()
             if(HistoryDealGetInteger(dj, DEAL_POSITION_ID) != posId)     continue;
             if(HistoryDealGetInteger(dj, DEAL_ENTRY)       != DEAL_ENTRY_IN) continue;
             string cmt = HistoryDealGetString(dj, DEAL_COMMENT);
-            if(StringFind(cmt, "SniperL2") >= 0 || StringFind(cmt, "SniperL3") >= 0 || StringFind(cmt, "EliteL4") >= 0)
+            if(StringFind(cmt, "SniperL2") >= 0 || StringFind(cmt, "SniperL3") >= 0 ||
+               StringFind(cmt, "EliteL4") >= 0  || StringFind(cmt, "CHAL_L2") >= 0   ||
+               StringFind(cmt, "CHAL_L3") >= 0  || StringFind(cmt, "CHAL_EliteL4") >= 0)
                g_L23LossCooldownEnd = TimeCurrent() + (long)InpL23LossCooldownH * 3600;
             break;
          }
@@ -997,7 +1034,9 @@ int CountL23TradesInPeriod(datetime from)
       if(HistoryDealGetInteger(dk, DEAL_MAGIC) != InpMagic)      continue;
       if(HistoryDealGetInteger(dk, DEAL_ENTRY) != DEAL_ENTRY_IN) continue;
       string cmt = HistoryDealGetString(dk, DEAL_COMMENT);
-      if(StringFind(cmt, "SniperL2") >= 0 || StringFind(cmt, "SniperL3") >= 0 || StringFind(cmt, "EliteL4") >= 0)
+      if(StringFind(cmt, "SniperL2") >= 0 || StringFind(cmt, "SniperL3") >= 0 ||
+         StringFind(cmt, "EliteL4") >= 0  || StringFind(cmt, "CHAL_L2") >= 0   ||
+         StringFind(cmt, "CHAL_L3") >= 0  || StringFind(cmt, "CHAL_EliteL4") >= 0)
          count++;
    }
    return count;
