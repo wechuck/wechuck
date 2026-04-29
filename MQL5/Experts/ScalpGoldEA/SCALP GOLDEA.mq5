@@ -396,6 +396,9 @@ int OnInit()
    // Reset V18 Core 2 – Consecutive loss scaler state
    g_ConsecLosses = 0;
 
+   // V19 – initialise effective runtime parameters from symbol profile
+   InitSymbolProfile();
+
    return(INIT_SUCCEEDED);
 }
 
@@ -436,7 +439,7 @@ void OnTick()
    {
       if(TimeCurrent() > g_PendingExpiry)
          ClearPending();
-      else if(spread <= InpMaxSpread && TryPendingEntry(Ask, Bid))
+      else if(spread <= g_MaxSpread && TryPendingEntry(Ask, Bid))
          return;
    }
 
@@ -445,7 +448,7 @@ void OnTick()
    {
       if(TimeCurrent() > g_ReentryExpiry)
          g_ReentryArmed = false;
-      else if(spread <= InpMaxSpread && TryReentry(Ask, Bid))
+      else if(spread <= g_MaxSpread && TryReentry(Ask, Bid))
          return;
    }
 
@@ -497,7 +500,7 @@ void OnTick()
    bool strongBuyReversal  = (close1 > close2) && (high1 > high2);
    bool strongSellReversal = (close1 < close2) && (low1 < low2);
 
-   double slPoints = InpStopLossPips * InpPipMultiplier;
+   double slPoints = g_SLPips * g_PipMult;
 
    // ======================================================
    // BUY SCORING ENGINE (entry conditions unchanged)
@@ -537,7 +540,7 @@ void OnTick()
          scoreRisk = InpRiskLevel1;
 
       // Precision gates: store pending instead of hard reject
-      if(spread > InpMaxSpread)                                { StorePending(1, scoreRisk); return; }
+      if(spread > g_MaxSpread)                                { StorePending(1, scoreRisk); return; }
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_BUY)) { StorePending(1, scoreRisk); return; }
       if(IsLargeCandle())                                      { StorePending(1, scoreRisk); return; }
       if(adx < InpADXDelayMin)                                 { StorePending(1, scoreRisk); return; }
@@ -584,7 +587,7 @@ void OnTick()
          scoreRisk = InpRiskLevel1;
 
       // Precision gates: store pending instead of hard reject
-      if(spread > InpMaxSpread)                                 { StorePending(-1, scoreRisk); return; }
+      if(spread > g_MaxSpread)                                 { StorePending(-1, scoreRisk); return; }
       if(InpUseVolFilter && !IsVolatilitySafe(ORDER_TYPE_SELL)) { StorePending(-1, scoreRisk); return; }
       if(IsLargeCandle())                                       { StorePending(-1, scoreRisk); return; }
       if(adx < InpADXDelayMin)                                  { StorePending(-1, scoreRisk); return; }
@@ -611,7 +614,7 @@ void ExecuteHFTOrder(ENUM_ORDER_TYPE type, double price, double slPoints, double
    // --- CHALLENGE MODE OVERRIDES ---
    double effectiveRisk   = assignedRisk;
    double effectiveSL     = slPoints;
-   double effectiveTPPips = InpTakeProfitPips;
+   double effectiveTPPips = g_TPPips;
 
    if(InpChallengeMode)
    {
@@ -632,7 +635,7 @@ void ExecuteHFTOrder(ENUM_ORDER_TYPE type, double price, double slPoints, double
    }
 
    effectiveSL = slPoints;
-   if(InpChallengeMode) effectiveSL = InpChallengeSL * InpPipMultiplier;
+   if(InpChallengeMode) effectiveSL = InpChallengeSL * g_PipMult;
 
    double moneyRisk  = balance * (effectiveRisk / 100.0);
    double tickValue  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -709,13 +712,13 @@ void ExecuteHFTOrder(ENUM_ORDER_TYPE type, double price, double slPoints, double
    if(type == ORDER_TYPE_BUY)
    {
       sl = price - effectiveSL * _Point;
-      tp = price + (effectiveTPPips * InpPipMultiplier * _Point);
+      tp = price + (effectiveTPPips * g_PipMult * _Point);
       trade.Buy(calculatedLot, _Symbol, price, sl, tp, comment);
    }
    else
    {
       sl = price + effectiveSL * _Point;
-      tp = price - (effectiveTPPips * InpPipMultiplier * _Point);
+      tp = price - (effectiveTPPips * g_PipMult * _Point);
       trade.Sell(calculatedLot, _Symbol, price, sl, tp, comment);
    }
 }
@@ -728,11 +731,11 @@ void ManageHFTExits()
    double Ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double Bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-   double partialTPDist = InpPartialTPPips  * InpPipMultiplier * _Point;
-   double beTriggerDist = InpBETriggerPips  * InpPipMultiplier * _Point;
-   double beLockDist    = InpBELockPips     * InpPipMultiplier * _Point;
-   double trailDist     = InpTrailDistPips  * InpPipMultiplier * _Point;
-   double trailStep     = InpTrailStepPips  * InpPipMultiplier * _Point;
+   double partialTPDist = g_PartialTPPips * g_PipMult * _Point;
+   double beTriggerDist = g_BETriggerPips * g_PipMult * _Point;
+   double beLockDist    = g_BELockPips    * g_PipMult * _Point;
+   double trailDist     = g_TrailDistPips * g_PipMult * _Point;
+   double trailStep     = g_TrailStepPips * g_PipMult * _Point;
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -939,7 +942,7 @@ bool TryPendingEntry(double Ask, double Bid)
    ENUM_ORDER_TYPE pendType = (g_PendingDir == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    if(!IsSignalAlignedWithTick(pendType)) return false;
 
-   double slPoints = InpStopLossPips * InpPipMultiplier;
+   double slPoints = g_SLPips * g_PipMult;
 
    if(g_PendingDir == 1)   // BUY pending
    {
@@ -1081,7 +1084,7 @@ bool TryReentry(double Ask, double Bid)
    bool strongBuyReversal  = (close1 > close2) && (high1 > high2);
    bool strongSellReversal = (close1 < close2) && (low1 < low2);
 
-   double slPoints = InpStopLossPips * InpPipMultiplier;
+   double slPoints = g_SLPips * g_PipMult;
 
    if(g_ReentryDir == 1 &&
       low1 <= bbLower[1] && rsiArr[1] < 35 && bullishCandle && strongBuyReversal)
@@ -1454,4 +1457,142 @@ bool IsWeekendBlocked()
    if(dt.day_of_week == 0) return true;                                     // Sunday
    if(dt.day_of_week == 1 && dt.hour < InpMondayOpenHour)  return true;    // Mon pre-open
    return false;
+}
+
+//+------------------------------------------------------------------+
+//| V19 – Multi-Pair Auto-Config: symbol profile initialiser        |
+//| Sets g_* effective runtime parameters from symbol-specific       |
+//| profiles.  Call once from OnInit() after the indicator handles   |
+//| are created.  When InpAutoSymbolConfig = false, the Inp* input   |
+//| values (Gold defaults) are used unchanged.                        |
+//|                                                                  |
+//| TIER 1 – Low Spread (optimal for M5 HFT scalping):              |
+//|   EURUSD · USDJPY · GBPUSD · AUDUSD · USDCAD · USDCHF · NZDUSD |
+//| TIER 2 – Moderate (acceptable, not ideal for HFT):              |
+//|   EURGBP · EURJPY · GBPJPY                                      |
+//| GOLD – XAUUSD / GOLD: uses input values as-is.                  |
+//+------------------------------------------------------------------+
+void InitSymbolProfile()
+{
+   // Seed all effective params from the user inputs (Gold defaults).
+   // If auto-config is off, or we're on Gold, these values are used directly.
+   g_PipMult       = InpPipMultiplier;
+   g_SLPips        = InpStopLossPips;
+   g_TPPips        = InpTakeProfitPips;
+   g_PartialTPPips = InpPartialTPPips;
+   g_BETriggerPips = InpBETriggerPips;
+   g_BELockPips    = InpBELockPips;
+   g_TrailDistPips = InpTrailDistPips;
+   g_TrailStepPips = InpTrailStepPips;
+   g_MaxSpread     = InpMaxSpread;
+
+   if(!InpAutoSymbolConfig)
+   {
+      PrintFormat("V19 Auto-Config: DISABLED – using manual inputs (%s)", _Symbol);
+      return;
+   }
+
+   string sym = _Symbol;
+   StringToUpper(sym);
+
+   // Gold / XAU: keep input defaults
+   if(StringFind(sym, "XAU") >= 0 || StringFind(sym, "GOLD") >= 0)
+   {
+      PrintFormat("V19 Auto-Config: GOLD profile (%s) – SL=%.0f TP=%.0f trail=%.0f maxSpread=%d",
+                  _Symbol, g_SLPips, g_TPPips, g_TrailDistPips, g_MaxSpread);
+      return;
+   }
+
+   // All modern forex brokers: 5-digit EUR/GBP/AUD/NZD/CAD/CHF and 3-digit JPY
+   // → 1 pip = 10 points in both cases.
+   g_PipMult = 10.0;
+
+   // ── TIER 1: Low-Spread Pairs ──────────────────────────────────────
+   // Recommended for HFT scalping: tight spread, high liquidity, well-tested
+   // Mean-reversion BB+RSI signals fire cleanly on these instruments.
+   if(StringFind(sym, "EURUSD") >= 0)
+   {
+      // Tight, liquid, ideal for M5 mean reversion
+      g_SLPips=15; g_TPPips=50; g_PartialTPPips=8;
+      g_BETriggerPips=10; g_BELockPips=2;
+      g_TrailDistPips=12; g_TrailStepPips=3; g_MaxSpread=15;
+   }
+   else if(StringFind(sym, "USDJPY") >= 0)
+   {
+      // Tight spreads, strong trends; slightly more volatile than EURUSD
+      g_SLPips=15; g_TPPips=50; g_PartialTPPips=8;
+      g_BETriggerPips=10; g_BELockPips=2;
+      g_TrailDistPips=12; g_TrailStepPips=3; g_MaxSpread=15;
+   }
+   else if(StringFind(sym, "GBPUSD") >= 0)
+   {
+      // Higher intraday range → wider SL/TP/trail to absorb GBP noise
+      g_SLPips=20; g_TPPips=60; g_PartialTPPips=10;
+      g_BETriggerPips=12; g_BELockPips=3;
+      g_TrailDistPips=15; g_TrailStepPips=4; g_MaxSpread=20;
+   }
+   else if(StringFind(sym, "AUDUSD") >= 0)
+   {
+      // Commodity-correlated but tight; similar profile to EURUSD
+      g_SLPips=15; g_TPPips=50; g_PartialTPPips=8;
+      g_BETriggerPips=10; g_BELockPips=2;
+      g_TrailDistPips=12; g_TrailStepPips=3; g_MaxSpread=15;
+   }
+   else if(StringFind(sym, "USDCAD") >= 0)
+   {
+      // Oil-correlated spikes → slightly wider SL
+      g_SLPips=18; g_TPPips=55; g_PartialTPPips=9;
+      g_BETriggerPips=11; g_BELockPips=2;
+      g_TrailDistPips=13; g_TrailStepPips=3; g_MaxSpread=20;
+   }
+   else if(StringFind(sym, "USDCHF") >= 0)
+   {
+      // Safe-haven flows can spike; same profile as USDCAD
+      g_SLPips=18; g_TPPips=55; g_PartialTPPips=9;
+      g_BETriggerPips=11; g_BELockPips=2;
+      g_TrailDistPips=13; g_TrailStepPips=3; g_MaxSpread=20;
+   }
+   else if(StringFind(sym, "NZDUSD") >= 0)
+   {
+      // Lowest daily range of majors → tighter params
+      g_SLPips=12; g_TPPips=45; g_PartialTPPips=7;
+      g_BETriggerPips=8; g_BELockPips=2;
+      g_TrailDistPips=10; g_TrailStepPips=3; g_MaxSpread=20;
+   }
+   // ── TIER 2: Moderate Pairs ────────────────────────────────────────
+   // Wider spreads or noisier price action; EA still works but less ideal.
+   else if(StringFind(sym, "EURGBP") >= 0)
+   {
+      // Low-volatility cross; very slow movement → tight params, wider spread ok
+      g_SLPips=10; g_TPPips=35; g_PartialTPPips=6;
+      g_BETriggerPips=7; g_BELockPips=1;
+      g_TrailDistPips=8; g_TrailStepPips=2; g_MaxSpread=20;
+   }
+   else if(StringFind(sym, "EURJPY") >= 0)
+   {
+      // Euro-Yen crosses with higher range; moderate spread
+      g_SLPips=20; g_TPPips=65; g_PartialTPPips=10;
+      g_BETriggerPips=12; g_BELockPips=3;
+      g_TrailDistPips=15; g_TrailStepPips=4; g_MaxSpread=25;
+   }
+   else if(StringFind(sym, "GBPJPY") >= 0)
+   {
+      // Most volatile cross listed; wide trail needed to survive GBP+JPY spikes
+      g_SLPips=28; g_TPPips=90; g_PartialTPPips=15;
+      g_BETriggerPips=17; g_BELockPips=4;
+      g_TrailDistPips=20; g_TrailStepPips=5; g_MaxSpread=40;
+   }
+   else
+   {
+      // Unknown symbol: apply a conservative generic Forex profile
+      g_SLPips=20; g_TPPips=60; g_PartialTPPips=10;
+      g_BETriggerPips=12; g_BELockPips=3;
+      g_TrailDistPips=15; g_TrailStepPips=4; g_MaxSpread=25;
+      PrintFormat("V19 Auto-Config: UNKNOWN symbol %s – generic Forex profile applied", _Symbol);
+   }
+
+   PrintFormat("V19 Auto-Config: %s profile – SL=%.0f TP=%.0f partial=%.0f BE=%0.f lock=%.0f trail=%.0f/%.0f maxSpread=%d",
+               _Symbol, g_SLPips, g_TPPips, g_PartialTPPips,
+               g_BETriggerPips, g_BELockPips,
+               g_TrailDistPips, g_TrailStepPips, g_MaxSpread);
 }
