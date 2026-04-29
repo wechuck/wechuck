@@ -1,8 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                              SCALP GOLDEA.mq5    |
 //|                                  Copyright 2026, Trading Pro     |
-//|   V18.0 - 4 Pro-Level Final Touches: Equity Guard, Loss Scaler,|
-//|           Friday Auto-Close, ATR-Adaptive Trailing             |
+//|   V18.1 - Revert ATR-Adaptive Trail (86% DD); Fixed-Pip Trail   |
 //+------------------------------------------------------------------+
 // Changelog:
 //   v18.0 – 4 PRO-LEVEL FINAL TOUCHES (zero entry condition changes; trade count preserved).
@@ -32,14 +31,14 @@
 //     through the weekend until InpMondayOpenHour on Monday.  This protection
 //     is compatible with challenge mode (no point compounding into a gap).
 //
-//   CORE 4 – ATR-ADAPTIVE TRAILING STOP
-//     The fixed 65-pip trail is too tight in high-volatility Gold sessions
-//     (stops out winners early) and too wide in quiet sessions (returns too
-//     much profit).  When InpUseATRTrail is enabled the trail distance becomes
-//     ATR[1] × InpATRTrailMult and the step becomes ATR[1] × InpATRStepMult.
-//     A floor of 50% of the fixed values prevents over-tightening on ultra-
-//     low-volatility bars.  The fixed values act as the fallback whenever ATR
-//     data is unavailable.
+//   CORE 4 – ATR-ADAPTIVE TRAILING (REVERTED in V18.1)
+//     The ATR×2.0 trail was reverted because on Gold's high-volatility
+//     sessions (ATR 150-200 pips) it created trails of 300-400 pips —
+//     giving back all open profit before closing.  Backtest showed 86%
+//     max drawdown and profit factor 1.04.  The fixed 65-pip trail from
+//     V17 (InpTrailDistPips / InpTrailStepPips) is restored.
+//     The fixed values remain fully configurable; the ATR trail inputs
+//     and override block have been removed to keep the code clean.
 //
 //   v17.0 – L2/L3/L4 SCORING GATE FIX + CHALLENGE MODE COMMENT LABELS.
 //
@@ -165,7 +164,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Pro"
 #property link      "https://www.mql5.com"
-#property version   "18.00"
+#property version   "18.10"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -255,11 +254,6 @@ input group "=== V18: CORE 3 – FRIDAY/WEEKEND PROTECTION ==="
 input bool   InpUseFridayClose  = true;   // Auto-close all positions at Friday closing hour
 input int    InpFridayCloseHour = 21;     // Server hour on Friday to close all + block new entries
 input int    InpMondayOpenHour  = 1;      // Server hour on Monday to resume trading
-
-input group "=== V18: CORE 4 – ATR-ADAPTIVE TRAILING ==="
-input bool   InpUseATRTrail     = true;   // Use ATR×multiplier trail instead of fixed pips
-input double InpATRTrailMult    = 2.0;    // Trail distance = ATR × this (wider in volatile sessions)
-input double InpATRStepMult     = 0.5;    // Trail step    = ATR × this
 
 //--- GLOBALS
 CTrade trade;
@@ -703,22 +697,6 @@ void ManageHFTExits()
    double beLockDist    = InpBELockPips     * InpPipMultiplier * _Point;
    double trailDist     = InpTrailDistPips  * InpPipMultiplier * _Point;
    double trailStep     = InpTrailStepPips  * InpPipMultiplier * _Point;
-
-   // V18 Core 4 – ATR-Adaptive Trailing: replace fixed pips with ATR×multiplier.
-   // In volatile Gold sessions the trail is wider (lets runners breathe and compound);
-   // in quiet sessions the trail tightens to lock profit faster.
-   // A 50% floor on the fixed values prevents over-tightening on ultra-low-volatility bars.
-   double atrTrailBuf[];
-   ArraySetAsSeries(atrTrailBuf, true);
-   if(InpUseATRTrail && CopyBuffer(handleATR, 0, 0, 2, atrTrailBuf) >= 2 && atrTrailBuf[1] > 0)
-   {
-      double atrTrail = atrTrailBuf[1] * InpATRTrailMult;
-      double atrStep  = atrTrailBuf[1] * InpATRStepMult;
-      double floorTrail = trailDist * 0.5;
-      double floorStep  = trailStep * 0.5;
-      trailDist = MathMax(atrTrail, floorTrail);
-      trailStep = MathMax(atrStep,  floorStep);
-   }
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
