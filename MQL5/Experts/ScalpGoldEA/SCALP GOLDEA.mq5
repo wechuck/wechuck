@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                              SCALP GOLDEA.mq5    |
 //|                                  Copyright 2026, Trading Pro     |
-//|   V18.1 - Revert ATR-Adaptive Trail (86% DD); Fixed-Pip Trail   |
+//|   V19.0 - Multi-Pair Auto-Config (EURUSD + low-spread pairs)    |
 //+------------------------------------------------------------------+
 // Changelog:
 //   v18.0 – 4 PRO-LEVEL FINAL TOUCHES (zero entry condition changes; trade count preserved).
@@ -39,6 +39,26 @@
 //     V17 (InpTrailDistPips / InpTrailStepPips) is restored.
 //     The fixed values remain fully configurable; the ATR trail inputs
 //     and override block have been removed to keep the code clean.
+//
+//   V19.0 – MULTI-PAIR AUTO-CONFIG (EURUSD + LOW-SPREAD PAIRS)
+//     On initialization the EA detects the symbol type (Gold vs Forex)
+//     and automatically overrides all pip/spread/SL/TP parameters to
+//     symbol-appropriate values via internal g_* runtime globals.  The
+//     input parameters remain as the Gold defaults (or manual override
+//     when InpAutoSymbolConfig = false).
+//
+//     STRATEGY DESIGN NOTE – Mean-Reversion vs Trend (resolved in V17):
+//     The core entry is pure mean-reversion: BB touch + RSI extreme +
+//     bullish/bearish candle.  The ADX and HTF EMA serve two distinct roles
+//     that do NOT conflict with mean-reversion:
+//       • HTF EMA (H4): tells which DIRECTION to revert TO — buying a lower-BB
+//         touch makes sense if H4 trend is up (buying dips in an uptrend).
+//       • ADX strength (not DI direction): high ADX at a BB extreme means the
+//         move to the extreme was impulsive/exhausted — a STRONGER mean-reversion
+//         candidate, not a trend-following entry.  V17 removed the M5 DI
+//         direction gate which was causing all L2/L3/L4 to score as L1.
+//     Result: the EA is coherently a mean-reversion system with directional
+//     bias from H4 and exhaustion quality from ADX strength.
 //
 //   v17.0 – L2/L3/L4 SCORING GATE FIX + CHALLENGE MODE COMMENT LABELS.
 //
@@ -164,7 +184,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Pro"
 #property link      "https://www.mql5.com"
-#property version   "18.10"
+#property version   "19.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -255,6 +275,9 @@ input bool   InpUseFridayClose  = true;   // Auto-close all positions at Friday 
 input int    InpFridayCloseHour = 21;     // Server hour on Friday to close all + block new entries
 input int    InpMondayOpenHour  = 1;      // Server hour on Monday to resume trading
 
+input group "=== V19: MULTI-PAIR AUTO-CONFIG ==="
+input bool   InpAutoSymbolConfig = true;  // Auto-detect symbol (Gold/Forex) and set pip/spread/SL/TP params
+
 //--- GLOBALS
 CTrade trade;
 int handleBB, handleRSI, handleADX, handleATR;
@@ -295,6 +318,19 @@ datetime g_EquityHaltUntil = 0;     // New entries blocked after equity guard fi
 
 // V18 Core 2 – Consecutive Loss Risk Scaler
 int      g_ConsecLosses = 0;   // Current consecutive losing-trade count; resets on any winning trade
+
+// V19 – Multi-Pair Auto-Config: effective runtime parameters
+// Initialized in OnInit() from inputs (Gold defaults) or symbol-specific profile.
+// All execution/exit code references these globals so multi-pair works transparently.
+double g_PipMult;         // effective points-per-pip
+double g_SLPips;          // effective stop-loss (pips)
+double g_TPPips;          // effective take-profit (pips)
+double g_PartialTPPips;   // effective partial-TP distance (pips)
+double g_BETriggerPips;   // effective breakeven trigger (pips)
+double g_BELockPips;      // effective breakeven lock (pips)
+double g_TrailDistPips;   // effective trailing distance (pips)
+double g_TrailStepPips;   // effective trailing step (pips)
+int    g_MaxSpread;       // effective max allowed spread (points)
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
