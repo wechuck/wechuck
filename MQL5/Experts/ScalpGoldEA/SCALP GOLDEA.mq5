@@ -228,9 +228,9 @@ input int      InpHourStart      = 1;         // Start HFT
 input int      InpHourEnd        = 22;        // Pause before Asian consolidation
 
 input group "=== 500 PIP CHALLENGE MODE ==="
-input bool     InpChallengeMode       = false; // Enable $20→$40k Challenge Mode
+input bool     InpChallengeMode       = true; // Enable $20→$40k Challenge Mode
 input double   InpChallengeRisk       = 30.0;  // Risk per trade in Challenge (%)
-input double   InpChallengeSL         = 150.0; // Stop Loss in Challenge (pips)
+input double   InpChallengeSL         = 80.0; // Stop Loss in Challenge (pips)
 input double   InpChallengeTP_Early   = 500.0; // TP when balance < threshold (pips)
 input double   InpChallengeTP_Late    = 20.0;  // TP when balance >= threshold (pips)
 input double   InpChallengeThreshold  = 300.0; // Balance threshold: switch from Early to Late TP ($)
@@ -277,7 +277,7 @@ input int    InpMondayOpenHour  = 1;      // Server hour on Monday to resume tra
 
 input group "=== V19: MULTI-PAIR AUTO-CONFIG ==="
 input bool   InpAutoSymbolConfig  = true;  // Auto-detect symbol (Gold/Forex) and set pip/spread/SL/TP params
-input string InpAllowedSymbols    = "XAUUSD,EURUSD,USDJPY,GBPUSD,AUDUSD,USDCAD,USDCHF,NZDUSD,EURGBP,EURJPY,GBPJPY"; // Comma-separated list of allowed symbols (empty = all)
+input string InpAllowedSymbols    = "GOLD#,EURUSD,USDJPY,GBPUSD,AUDUSD,USDCAD,USDCHF,NZDUSD,EURGBP,EURJPY,GBPJPY"; // Comma-separated list of allowed symbols (empty = all)
 
 //--- GLOBALS
 CTrade trade;
