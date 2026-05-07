@@ -257,7 +257,7 @@ bool     g_V20MRShutdown = false;
 int      g_V20MRBars     = 0;
 
 // Engine health — trend-momentum
-int      g_V20TMlosses   = 0;
+int      g_V20TMLosses   = 0;
 bool     g_V20TMShutdown = false;
 int      g_V20TMBars     = 0;
 
@@ -362,7 +362,7 @@ int OnInit()
    g_V20LastLoggedRegime  = REGIME_V20_CHAOS;
    g_V20LastLoggedConf    = 0.0;
    g_V20MRLosses          = 0; g_V20MRShutdown = false; g_V20MRBars = 0;
-   g_V20TMlosses          = 0; g_V20TMShutdown = false; g_V20TMBars = 0;
+   g_V20TMLosses          = 0; g_V20TMShutdown = false; g_V20TMBars = 0;
    g_V20LastBarTime       = 0;
    g_V20LastDealScan      = 0;
    g_V20ActiveEngine      = 0;
@@ -785,7 +785,7 @@ bool V20IsEngineShutdown(ENUM_ENGINE_V20 eng)
       if(g_V20TMBars >= InpV20RecoveryBars)
       {
          g_V20TMShutdown = false;
-         g_V20TMlosses   = 0;
+         g_V20TMLosses   = 0;
          Print("V20: TrendMomentum engine RECOVERED (bars elapsed)");
       }
       return g_V20TMShutdown;
@@ -841,16 +841,16 @@ void V20ScanClosedDeals()
       {
          if(isLoss)
          {
-            g_V20TMlosses++;
-            if(g_V20TMlosses >= InpV20ShutLosses && !g_V20TMShutdown)
+            g_V20TMLosses++;
+            if(g_V20TMLosses >= InpV20ShutLosses && !g_V20TMShutdown)
             {
                g_V20TMShutdown = true;
                g_V20TMBars     = 0;
-               PrintFormat("V20: TrendMomentum SHUTDOWN after %d consecutive losses", g_V20TMlosses);
+               PrintFormat("V20: TrendMomentum SHUTDOWN after %d consecutive losses", g_V20TMLosses);
             }
          }
          else
-            g_V20TMlosses = 0;   // Win resets TM streak
+            g_V20TMLosses = 0;   // Win resets TM streak
       }
       else
       {
