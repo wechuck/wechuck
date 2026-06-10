@@ -74,7 +74,7 @@ string GetAdxStateStr(double &outAdxVal)
    int h = iADX(_Symbol, PERIOD_M1, InpAdxPeriod);
    if(h == INVALID_HANDLE) return "N/A";
 
-   double buf[3];
+   double buf[];
    ArraySetAsSeries(buf, true);
    string state = "N/A";
    if(CopyBuffer(h, 0, 1, 3, buf) >= 3)

@@ -11,25 +11,35 @@ enum TradeDirection
    DIR_SELL = -1
 };
 
-// Entry result from the strategy signal evaluation.
-// 'valid'     – true when a confirmed Setup A, B, or C signal fired.
-// 'setup'     – which setup triggered (SETUP_RUBBER_BAND / SETUP_RANGE_SCALP / SETUP_HFT_RANGE_SCALP).
-// 'direction' – STRAT_DIR_BUY or STRAT_DIR_SELL (compatible with TradeDirection).
-// 'boxHigh' / 'boxLow' – 5M structural box boundaries (used for Setup B/C TP).
+// Entry result returned by EntryScoring.Evaluate() to the EA.
+// 'valid'     – true when a confirmed signal was detected.
+// 'setup'     – which setup triggered (A–F).
+// 'direction' – STRAT_DIR_BUY or STRAT_DIR_SELL.
+// 'suggestedSL' / 'suggestedTP' – raw price levels from the strategy core (EA adds buffers).
+// 'keyLevel'  – primary S/R level (used for box-invalidation / management).
 struct EntryScoreBreakdown
 {
    bool      valid;
    SetupType setup;
    int       direction;
-   double    adx1M;
-   double    adx5M;
-   double    stochK;
-   double    rsiCur;
-   double    boxHigh;
-   double    boxLow;
-   double    signalBarHigh;   // 1M bar[1] high – for wick-based SL placement
-   double    signalBarLow;    // 1M bar[1] low  – for wick-based SL placement
    string    details;
+
+   // SL / TP from strategy core (before EA spread/buffer adjustments)
+   double    suggestedSL;
+   double    suggestedTP;
+
+   // Signal bar context (last completed M15 bar)
+   double    signalBarHigh;
+   double    signalBarLow;
+
+   // Key level driving the setup (Asian range edge, OB level, pivot, MSS flip, etc.)
+   double    keyLevel;
+
+   // Supplemental context for management and logging
+   int       h4Bias;              // H4 EMA bias: 1=bull, -1=bear, 0=neutral
+   bool      wickSweepConfirmed;  // Setup A/F: wick-sweep trap confirmed
+   double    sweepWickLow;        // BUY: extreme of sweep wick below key level
+   double    sweepWickHigh;       // SELL: extreme of sweep wick above key level
 };
 
 struct BiasResult

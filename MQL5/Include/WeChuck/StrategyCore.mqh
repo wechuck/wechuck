@@ -2,449 +2,927 @@
 #define __WECHUCK_STRATEGY_CORE_MQH__
 
 //──────────────────────────────────────────────────────────────────────────────
-// StrategyCore.mqh
-// Shared signal library for the Multi-Timeframe Exhaustion & Range Scalp
-// Strategy.  Contains all pure indicator logic; zero UI, zero order code.
+// StrategyCore.mqh – WeChuck Institutional Edge Engine (v4.00)
 //
-// Direction integers are compatible with the EA's TradeDirection enum:
-//   0 = NONE  |  1 = BUY  |  -1 = SELL
+// Six institutional-grade setups.  Zero retail-indicator crossovers.
+// All signals derived from price structure, liquidity, and session mechanics.
+//
+// Setup A – London Liquidity Sweep   : Asian-range stop-hunt reversal
+// Setup B – H4 Order Block Retest    : Institutional demand/supply zone retest
+// Setup C – Fair Value Gap Fill      : H1 imbalance fill in trend direction
+// Setup D – Daily Pivot Bounce       : Classic mathematical S/R with M15 confirmation
+// Setup E – MSS Retest (Smart Money) : Market Structure Shift – broken level retest
+// Setup F – Weekly Sniper            : Prior week High/Low sweep, 20-pip challenge
+//
+// Direction constants match TradeDirection enum in Types.mqh
 //──────────────────────────────────────────────────────────────────────────────
 
-// Direction constants (match TradeDirection enum in EA Types.mqh)
 #define STRAT_DIR_NONE  0
 #define STRAT_DIR_BUY   1
 #define STRAT_DIR_SELL  (-1)
 
 enum SetupType
 {
-   SETUP_NONE           = 0,  // No valid signal
-   SETUP_RUBBER_BAND    = 1,  // Setup A – high ADX exhaustion reversal
-   SETUP_RANGE_SCALP    = 2,  // Setup B – low ADX range bounce (with Stoch cross)
-   SETUP_HFT_RANGE_SCALP = 3  // Setup C – HFT box-touch scalp (no Stoch cross required)
+   SETUP_NONE              = 0,
+   SETUP_LONDON_SWEEP      = 1,  // Setup A – London session Asian-range stop-hunt reversal
+   SETUP_ORDER_BLOCK       = 2,  // Setup B – H4 unmitigated order block retest
+   SETUP_FVG_FILL          = 3,  // Setup C – H1 Fair Value Gap fill in H4 trend direction
+   SETUP_PIVOT_BOUNCE      = 4,  // Setup D – Classic daily pivot level bounce
+   SETUP_MSS_RETEST        = 5,  // Setup E – H1 Market Structure Shift retest
+   SETUP_WEEKLY_PRECISION  = 6   // Setup F – Weekly high/low sniper (20-pip challenge)
 };
 
 // ── Parameter bundle ─────────────────────────────────────────────────────────
 struct StrategyParams
 {
-   // ADX
-   int    adxPeriod;
-   double adxExhaustionLevel;    // Setup A: 1M ADX must be > this (default 40)
-   double adxExpandingMin;       // Invalidation gate lower bound (default 25)
-   double adxExpandingMax;       // Invalidation gate upper bound (default 35)
-   double adxRangingThreshold;   // Setup B: 5M ADX must be < this (default 20)
-   double adxExitWeakThreshold;  // Dynamic exit when ADX drops below (default 18)
+   // Shared: H4 EMA trend filter (all setups)
+   int    h4EmaFast;             // Default 50
+   int    h4EmaSlow;             // Default 200
 
-   // RSI
-   int    rsiPeriod;
-   double rsiOversold;           // Setup A BUY confirmation level (default 30)
-   double rsiOverbought;         // Setup A SELL confirmation level (default 70)
-
-   // Stochastic
+   // Shared: Stochastic (only used by Setup F confirmation)
    int    stochKPeriod;
    int    stochDPeriod;
    int    stochSlowing;
-   double stochOversold;         // Oversold threshold (default 20)
-   double stochOverbought;       // Overbought threshold (default 80)
+   double stochOversold;
+   double stochOverbought;
 
-   // 5M Range Box
-   int    m5RangeLookback;       // Bars of 5M history to define the box
-   double boxTouchTolerancePct;  // Fraction of box size – price must be within
-                                 // this fraction of the edge to qualify (0.15 = 15%)
+   // ── Setup A: London Liquidity Sweep ──────────────────────────────────────
+   bool   setupAEnabled;
+   int    asianStartHour;        // Asian session UTC start (default 0)
+   int    asianEndHour;          // Asian session UTC end   (default 7)
+   int    londonStartHour;       // London window UTC start (default 7)
+   int    londonEndHour;         // London window UTC end   (default 10)
+   double setupASweepBuf;        // Max sweep depth beyond Asian H/L in price units
+   double setupAMinRange;        // Min Asian range size in price units (quality gate)
 
-   // Per-setup enable switches
-   bool   setupAEnabled;         // Master switch for Setup A (Rubber Band)
-   bool   setupBEnabled;         // Master switch for Setup B (Range Scalp)
+   // ── Setup B: H4 Order Block Retest ───────────────────────────────────────
+   bool   setupBEnabled;
+   int    setupBH4Lookback;      // H4 bars back to search for OBs (default 50)
+   double setupBImpulseFactor;   // Impulse candle must be >= factor × avg range (default 1.5)
+   double setupBRetestPct;       // Price must be within this fraction of OB zone (default 0.30)
+   int    setupBMaxAgeHours;     // OB expires after this many hours (default 48)
 
-   // Setup C – HFT Range Scalp
-   bool   setupCEnabled;         // Master switch for Setup C
-   bool   setupCRequireADX;      // When true, 5M ADX must be < adxRangingThreshold
-   double setupCMinBoxSize;      // Minimum box range in price units (pre-converted from pips)
+   // ── Setup C: Fair Value Gap Fill ─────────────────────────────────────────
+   bool   setupCEnabled;
+   int    setupCH1Lookback;      // H1 bars back to search for FVGs (default 20)
+   double setupCMinFVGSize;      // Min FVG size in price units (quality gate)
+
+   // ── Setup D: Daily Pivot Bounce ───────────────────────────────────────────
+   bool   setupDEnabled;
+   double setupDPivotTolerance;  // Max distance from pivot in price units to qualify
+
+   // ── Setup E: Market Structure Shift Retest ────────────────────────────────
+   bool   setupEEnabled;
+   int    setupESwingLookback;   // H1 bars to scan for swing high/low (default 30)
+   double setupERetestBuffer;    // Retest zone half-width in price units
+
+   // ── Setup F: Weekly Precision Scalp ──────────────────────────────────────
+   bool   setupFEnabled;
+   double setupFWeeklySweepBuf;  // Max M15 wick beyond weekly level (price units)
+   bool   setupFRequireH4Align;  // H4 EMA must not oppose trade direction
+   bool   setupFRequireM15Stoch; // M15 Stochastic must cross from extreme
 };
 
-// ── Signal output ─────────────────────────────────────────────────────────────
+// ── Signal output from Evaluate() ────────────────────────────────────────────
 struct StrategySignal
 {
    SetupType setupType;
-   int       direction;       // STRAT_DIR_BUY / STRAT_DIR_SELL / STRAT_DIR_NONE
-   double    adx1M;           // Last closed 1M ADX value
-   double    adx1MPrev;       // 1M ADX one bar prior (for hook & expanding detection)
-   bool      adxHooking;      // True when 1M ADX just turned down from its peak
-   double    adx5M;           // Last closed 5M ADX value
-   double    stochK;          // Last closed Stochastic %K
-   double    stochKPrev;      // %K one bar prior
-   double    stochD;          // Last closed Stochastic %D
-   double    rsiCur;          // Last closed RSI
-   double    rsiPrev;         // RSI one bar prior
-   double    boxHigh;         // 5M range box upper boundary
-   double    boxLow;          // 5M range box lower boundary
-   double    signalBarHigh;   // 1M bar[1] high – EA uses this for wick-based SL (Setup A)
-   double    signalBarLow;    // 1M bar[1] low  – EA uses this for wick-based SL (Setup A)
-   string    details;         // Human-readable reason string for logging
+   int       direction;      // STRAT_DIR_BUY / SELL / NONE
+   string    details;
+
+   // Price levels for SL/TP placement in the EA
+   double    suggestedSL;    // Raw SL price (before spread/buffer added by EA)
+   double    suggestedTP;    // Raw TP price (0 = EA uses RR-based TP)
+   double    keyLevel;       // The primary S/R level that triggered the setup
+
+   // Signal-bar context
+   double    signalBarHigh;  // Last closed M15 bar high (for SL anchoring)
+   double    signalBarLow;   // Last closed M15 bar low
+
+   // Supplemental state for EA management
+   int       h4Bias;         // 1=bull, -1=bear, 0=neutral
+   bool      wickSweepConfirmed;
+   double    sweepWickLow;   // BUY: extreme of sweep wick below key level
+   double    sweepWickHigh;  // SELL: extreme of sweep wick above key level
 };
 
-// ── Core class ────────────────────────────────────────────────────────────────
-class CStrategyCore
+// ─────────────────────────────────────────────────────────────────────────────
+class CInstitutionalCore
 {
 private:
+
    //──────────────────────────────────────────────────────────────────────────
-   // Read ADX from closed bars.
-   // outVal  = bar[1] (last closed)
-   // outPrev = bar[2] (one bar prior)
-   // outHooking = ADX peaked at bar[2] and turned down: bar[2] > bar[3] &&
-   //              bar[1] < bar[2]  (hook detected on the last closed bar)
+   // Utility helpers
    //──────────────────────────────────────────────────────────────────────────
-   bool GetAdxState(const string symbol, const ENUM_TIMEFRAMES tf, const int period,
-                    double &outVal, double &outPrev, bool &outHooking)
+
+   bool IsGoldSymbol(const string symbol)
    {
-      outVal = 0.0; outPrev = 0.0; outHooking = false;
-      int h = iADX(symbol, tf, period);
-      if(h == INVALID_HANDLE) return false;
+      string upper = symbol;
+      StringToUpper(upper);
+      return (StringFind(upper, "XAU") >= 0 || StringFind(upper, "GOLD") >= 0);
+   }
 
-      double buf[3];
-      ArraySetAsSeries(buf, true);
-      // buf[0]=bar1, buf[1]=bar2, buf[2]=bar3 (all closed)
-      bool ok = (CopyBuffer(h, 0, 1, 3, buf) >= 3);
-      IndicatorRelease(h);
+   // Returns H4 EMA bias: 1=bullish, -1=bearish, 0=neutral/flat
+   bool GetH4EMATrend(const string symbol, const int fastP, const int slowP, int &outBias)
+   {
+      outBias = 0;
+      if(fastP <= 0 || slowP <= 0) return false;
+      int hFast = iMA(symbol, PERIOD_H4, fastP, 0, MODE_EMA, PRICE_CLOSE);
+      int hSlow  = iMA(symbol, PERIOD_H4, slowP,  0, MODE_EMA, PRICE_CLOSE);
+      if(hFast == INVALID_HANDLE || hSlow == INVALID_HANDLE)
+      {
+         if(hFast != INVALID_HANDLE) IndicatorRelease(hFast);
+         if(hSlow  != INVALID_HANDLE) IndicatorRelease(hSlow);
+         return false;
+      }
+      double fast[], slow[];
+      ArraySetAsSeries(fast, true);
+      ArraySetAsSeries(slow, true);
+      bool ok = (CopyBuffer(hFast, 0, 1, 1, fast) >= 1 &&
+                 CopyBuffer(hSlow,  0, 1, 1, slow) >= 1);
+      IndicatorRelease(hFast);
+      IndicatorRelease(hSlow);
       if(!ok) return false;
-
-      outVal     = buf[0];  // last closed bar
-      outPrev    = buf[1];  // one bar prior
-      // Hook: bar2 was the peak (higher than bar3), bar1 is now declining
-      outHooking = (buf[1] > buf[2] && buf[0] < buf[1]);
+      outBias = (fast[0] > slow[0]) ? 1 : (fast[0] < slow[0]) ? -1 : 0;
       return true;
    }
 
-   //──────────────────────────────────────────────────────────────────────────
-   // Read Stochastic K and D from the last two closed 1M bars.
-   //──────────────────────────────────────────────────────────────────────────
-   bool GetStochKD(const string symbol,
-                   const int kPeriod, const int dPeriod, const int slowing,
-                   double &outK, double &outKPrev,
-                   double &outD, double &outDPrev)
+   // Returns true if the last closed M15 bar shows a valid rejection candle in dir.
+   // Hammer / Pin bar: the directional wick must be >= 40% of the total bar range,
+   // and the candle body must close in the reversal direction.
+   bool IsM15RejectionCandle(const string symbol, const int dir)
    {
-      outK = outKPrev = outD = outDPrev = 0.0;
-      int h = iStochastic(symbol, PERIOD_M1, kPeriod, dPeriod, slowing,
-                          MODE_SMA, STO_LOWHIGH);
-      if(h == INVALID_HANDLE) return false;
+      MqlRates m15[];
+      ArraySetAsSeries(m15, true);
+      if(CopyRates(symbol, PERIOD_M15, 1, 1, m15) < 1) return false;
+      double range = m15[0].high - m15[0].low;
+      if(range <= 0.0) return false;
+      if(dir == STRAT_DIR_BUY)
+      {
+         double lowerWick = MathMin(m15[0].open, m15[0].close) - m15[0].low;
+         return (lowerWick >= range * 0.40 && m15[0].close >= m15[0].open);
+      }
+      else
+      {
+         double upperWick = m15[0].high - MathMax(m15[0].open, m15[0].close);
+         return (upperWick >= range * 0.40 && m15[0].close <= m15[0].open);
+      }
+   }
 
-      double kBuf[3], dBuf[3];
+   //──────────────────────────────────────────────────────────────────────────
+   // Setup A helpers – London Liquidity Sweep
+   //──────────────────────────────────────────────────────────────────────────
+
+   // Build the Asian session high/low from H1 bars between asianStartHour and
+   // asianEndHour (UTC) for the current calendar day.
+   // Uses TimeGMT() to avoid broker-timezone dependency.
+   bool GetAsianRangeHL(const string symbol,
+                        const int asianStartHour, const int asianEndHour,
+                        double &asianHigh, double &asianLow)
+   {
+      asianHigh = 0.0;
+      asianLow  = DBL_MAX;
+
+      // Determine GMT midnight of today
+      datetime gmtNow = TimeGMT();
+      MqlDateTime gmtDT;
+      TimeToStruct(gmtNow, gmtDT);
+      datetime todayMidnightGMT = gmtNow -
+         (datetime)((long)gmtDT.hour * 3600 + gmtDT.min * 60 + gmtDT.sec);
+
+      // GMT offset of broker server (seconds)
+      long gmtOffset = (long)(TimeGMT() - TimeCurrent());
+
+      MqlRates h1[];
+      ArraySetAsSeries(h1, true);
+      int copied = CopyRates(symbol, PERIOD_H1, 0, 24, h1);
+      if(copied < 3) return false;
+
+      int asianBarCount = 0;
+      for(int i = 0; i < copied; i++)
+      {
+         // Convert bar's broker time to UTC
+         datetime barGMT = h1[i].time + (datetime)gmtOffset;
+         MqlDateTime bd;
+         TimeToStruct(barGMT, bd);
+
+         // Must be on today's date and within the Asian session window
+         if(barGMT >= todayMidnightGMT &&
+            bd.hour >= asianStartHour && bd.hour < asianEndHour)
+         {
+            if(h1[i].high > asianHigh) asianHigh = h1[i].high;
+            if(h1[i].low  < asianLow)  asianLow  = h1[i].low;
+            asianBarCount++;
+         }
+      }
+
+      if(asianBarCount < 2 || asianHigh <= asianLow) return false;
+      return true;
+   }
+
+   // Returns true if the last closed M15 bar swept (wick pierced + closed back) the
+   // Asian high (SELL) or Asian low (BUY).
+   bool CheckLondonSweep(const string symbol, const int dir,
+                         const double asianHigh, const double asianLow,
+                         const double sweepBuf, double &outWick)
+   {
+      outWick = 0.0;
+      MqlRates m15[];
+      ArraySetAsSeries(m15, true);
+      if(CopyRates(symbol, PERIOD_M15, 1, 1, m15) < 1) return false;
+
+      if(dir == STRAT_DIR_BUY)
+      {
+         // Wick pierced below Asian low, closed back above it
+         bool swept = (m15[0].low  <  asianLow          &&
+                       m15[0].low  >= asianLow - sweepBuf &&
+                       m15[0].close > asianLow);
+         if(!swept) return false;
+         outWick = m15[0].low;
+         return true;
+      }
+      else
+      {
+         // Wick pierced above Asian high, closed back below it
+         bool swept = (m15[0].high >  asianHigh          &&
+                       m15[0].high <= asianHigh + sweepBuf &&
+                       m15[0].close < asianHigh);
+         if(!swept) return false;
+         outWick = m15[0].high;
+         return true;
+      }
+   }
+
+   //──────────────────────────────────────────────────────────────────────────
+   // Setup B helpers – H4 Order Block Retest
+   //──────────────────────────────────────────────────────────────────────────
+
+   // Finds the most recent unmitigated H4 Order Block in the given direction.
+   // OB = the last opposing candle immediately before a strong directional impulse.
+   // "Unmitigated" = price has not returned to the OB zone since its creation.
+   bool FindH4OrderBlock(const string symbol, const int direction,
+                         const int lookback, const double impulseFactor,
+                         const int maxAgeHours,
+                         double &obHigh, double &obLow, datetime &obTime)
+   {
+      obHigh = obLow = 0.0;
+      obTime = 0;
+
+      MqlRates h4[];
+      ArraySetAsSeries(h4, true);
+      int copied = CopyRates(symbol, PERIOD_H4, 1, lookback, h4);
+      if(copied < 5) return false;
+
+      // Average bar range for impulse detection
+      double avgRange = 0.0;
+      for(int i = 0; i < copied; i++)
+         avgRange += (h4[i].high - h4[i].low);
+      avgRange /= copied;
+      if(avgRange <= 0.0) return false;
+
+      // Scan from most recent backward (index 0 = most recent closed H4 bar)
+      for(int i = 1; i < copied - 2; i++)
+      {
+         // The bar at index (i-1) is the potential impulse candle (more recent)
+         double impulseRange = h4[i-1].high - h4[i-1].low;
+         if(impulseRange < avgRange * impulseFactor) continue;
+
+         // Age check
+         datetime age = TimeCurrent() - h4[i].time;
+         if(age > (datetime)((long)maxAgeHours * 3600)) continue;
+
+         if(direction == STRAT_DIR_BUY)
+         {
+            // Demand OB: last BEARISH candle before a BULLISH impulse
+            bool impulseIsBullish = (h4[i-1].close > h4[i-1].open);
+            bool obIsBearish      = (h4[i].close    < h4[i].open);
+            if(!impulseIsBullish || !obIsBearish) continue;
+
+            // Unmitigated check: no bar between i-1 and 0 touched the OB zone
+            bool mitigated = false;
+            for(int j = i - 1; j >= 0; j--)
+            {
+               if(h4[j].low <= h4[i].open && h4[j].high >= h4[i].close)
+               { mitigated = true; break; }
+            }
+            if(mitigated) continue;
+
+            obHigh = MathMax(h4[i].open, h4[i].close); // body top
+            obLow  = MathMin(h4[i].open, h4[i].close); // body bottom
+            obTime = h4[i].time;
+            return true;
+         }
+         else
+         {
+            // Supply OB: last BULLISH candle before a BEARISH impulse
+            bool impulseIsBearish = (h4[i-1].close < h4[i-1].open);
+            bool obIsBullish      = (h4[i].close    > h4[i].open);
+            if(!impulseIsBearish || !obIsBullish) continue;
+
+            bool mitigated = false;
+            for(int j = i - 1; j >= 0; j--)
+            {
+               if(h4[j].low <= h4[i].close && h4[j].high >= h4[i].open)
+               { mitigated = true; break; }
+            }
+            if(mitigated) continue;
+
+            obHigh = MathMax(h4[i].open, h4[i].close);
+            obLow  = MathMin(h4[i].open, h4[i].close);
+            obTime = h4[i].time;
+            return true;
+         }
+      }
+      return false;
+   }
+
+   // Returns true if the current mid-price is inside (or within retestPct of) the OB body.
+   bool PriceAtOrderBlock(const string symbol, const double obHigh, const double obLow,
+                          const double retestPct)
+   {
+      MqlTick tick;
+      if(!SymbolInfoTick(symbol, tick)) return false;
+      double mid  = (tick.ask + tick.bid) * 0.5;
+      double zone = (obHigh - obLow) * retestPct;
+      return (mid >= obLow - zone && mid <= obHigh + zone);
+   }
+
+   //──────────────────────────────────────────────────────────────────────────
+   // Setup C helpers – Fair Value Gap (FVG) Fill
+   //──────────────────────────────────────────────────────────────────────────
+
+   // Scans recent H1 bars for the most recent FVG in the given direction.
+   // Bullish FVG: bar[i+1].high < bar[i-1].low (gap going up through bar[i]).
+   // Bearish FVG: bar[i+1].low  > bar[i-1].high.
+   // Array is SetAsSeries: index 0 = most recent closed bar.
+   bool FindH1FVG(const string symbol, const int direction,
+                  const int lookback, const double minSize,
+                  double &fvgHigh, double &fvgLow)
+   {
+      fvgHigh = fvgLow = 0.0;
+
+      MqlRates h1[];
+      ArraySetAsSeries(h1, true);
+      int copied = CopyRates(symbol, PERIOD_H1, 1, lookback + 2, h1);
+      if(copied < 3) return false;
+
+      for(int i = 1; i < copied - 1; i++)
+      {
+         if(direction == STRAT_DIR_BUY)
+         {
+            // Bullish FVG: gap between h1[i+1].high and h1[i-1].low
+            if(h1[i+1].high < h1[i-1].low)
+            {
+               double gap = h1[i-1].low - h1[i+1].high;
+               if(gap >= minSize)
+               {
+                  fvgLow  = h1[i+1].high;
+                  fvgHigh = h1[i-1].low;
+                  return true; // return most recent FVG
+               }
+            }
+         }
+         else
+         {
+            // Bearish FVG: gap between h1[i-1].high and h1[i+1].low
+            if(h1[i+1].low > h1[i-1].high)
+            {
+               double gap = h1[i+1].low - h1[i-1].high;
+               if(gap >= minSize)
+               {
+                  fvgHigh = h1[i+1].low;
+                  fvgLow  = h1[i-1].high;
+                  return true;
+               }
+            }
+         }
+      }
+      return false;
+   }
+
+   // True if current mid-price is inside the FVG zone.
+   bool PriceInFVG(const string symbol, const double fvgHigh, const double fvgLow)
+   {
+      MqlTick tick;
+      if(!SymbolInfoTick(symbol, tick)) return false;
+      double mid = (tick.ask + tick.bid) * 0.5;
+      return (mid >= fvgLow && mid <= fvgHigh);
+   }
+
+   //──────────────────────────────────────────────────────────────────────────
+   // Setup D helpers – Daily Classic Pivot Bounce
+   //──────────────────────────────────────────────────────────────────────────
+
+   // Calculates classic floor trader pivots from the previous completed D1 bar.
+   bool GetDailyPivots(const string symbol,
+                       double &pp, double &r1, double &r2, double &s1, double &s2)
+   {
+      pp = r1 = r2 = s1 = s2 = 0.0;
+      MqlRates daily[];
+      ArraySetAsSeries(daily, true);
+      if(CopyRates(symbol, PERIOD_D1, 1, 1, daily) < 1) return false;
+      double h = daily[0].high;
+      double l = daily[0].low;
+      double c = daily[0].close;
+      pp = (h + l + c) / 3.0;
+      r1 = 2.0 * pp - l;
+      r2 = pp + (h - l);
+      s1 = 2.0 * pp - h;
+      s2 = pp - (h - l);
+      return (pp > 0.0);
+   }
+
+   // Returns true if current price is within tolerance of pivotLevel AND the
+   // last M15 bar shows a rejection candle in dir.
+   bool CheckPivotBounce(const string symbol, const int dir,
+                         const double pivotLevel, const double tolerance)
+   {
+      MqlTick tick;
+      if(!SymbolInfoTick(symbol, tick)) return false;
+      double mid = (tick.ask + tick.bid) * 0.5;
+      if(MathAbs(mid - pivotLevel) > tolerance) return false;
+      return IsM15RejectionCandle(symbol, dir);
+   }
+
+   //──────────────────────────────────────────────────────────────────────────
+   // Setup E helpers – Market Structure Shift (MSS) Retest
+   //──────────────────────────────────────────────────────────────────────────
+
+   // Finds the most recent H1 swing high (for BUY-MSS) or swing low (for SELL-MSS)
+   // that has been broken by a subsequent close.  Returns the broken level (mssLevel)
+   // which, once broken, flips: resistance → support (BUY) or support → resistance (SELL).
+   bool FindH1MSS(const string symbol, const int direction,
+                  const int lookback, double &mssLevel)
+   {
+      mssLevel = 0.0;
+      MqlRates h1[];
+      ArraySetAsSeries(h1, true);
+      int copied = CopyRates(symbol, PERIOD_H1, 1, lookback, h1);
+      if(copied < 10) return false;
+
+      if(direction == STRAT_DIR_BUY)
+      {
+         // Look for the most recent swing HIGH (local peak) that was broken upward
+         for(int i = 3; i < copied - 3; i++)
+         {
+            bool isSwingHigh = (h1[i].high > h1[i+1].high && h1[i].high > h1[i+2].high &&
+                                h1[i].high > h1[i-1].high && h1[i].high > h1[i-2].high);
+            if(!isSwingHigh) continue;
+
+            double swingH = h1[i].high;
+            // Check if any bar MORE RECENT (lower index) closed above swingH
+            for(int j = 0; j < i - 1; j++)
+            {
+               if(h1[j].close > swingH)
+               {
+                  mssLevel = swingH; // flip level – now acts as support
+                  return true;
+               }
+            }
+            break; // only check the single most recent qualifying swing high
+         }
+      }
+      else
+      {
+         // Look for the most recent swing LOW that was broken downward
+         for(int i = 3; i < copied - 3; i++)
+         {
+            bool isSwingLow = (h1[i].low < h1[i+1].low && h1[i].low < h1[i+2].low &&
+                               h1[i].low < h1[i-1].low && h1[i].low < h1[i-2].low);
+            if(!isSwingLow) continue;
+
+            double swingL = h1[i].low;
+            for(int j = 0; j < i - 1; j++)
+            {
+               if(h1[j].close < swingL)
+               {
+                  mssLevel = swingL; // flip level – now acts as resistance
+                  return true;
+               }
+            }
+            break;
+         }
+      }
+      return false;
+   }
+
+   // True if current price is retesting the MSS level within the buffer zone.
+   bool CheckMSSRetest(const string symbol, const int dir,
+                       const double mssLevel, const double buffer)
+   {
+      MqlTick tick;
+      if(!SymbolInfoTick(symbol, tick)) return false;
+      double mid = (tick.ask + tick.bid) * 0.5;
+      // Price must be approaching the level from the "new" side
+      if(dir == STRAT_DIR_BUY)
+         return (mid >= mssLevel - buffer && mid <= mssLevel + buffer * 0.5);
+      else
+         return (mid >= mssLevel - buffer * 0.5 && mid <= mssLevel + buffer);
+   }
+
+   //──────────────────────────────────────────────────────────────────────────
+   // Setup F helpers – Weekly High/Low Sniper (unchanged from prior session)
+   //──────────────────────────────────────────────────────────────────────────
+
+   bool GetWeeklyHighLow(const string symbol,
+                         double &priorHigh, double &priorLow,
+                         double &curHigh,   double &curLow)
+   {
+      priorHigh = priorLow = curHigh = curLow = 0.0;
+      MqlRates weekly[];
+      ArraySetAsSeries(weekly, true);
+      if(CopyRates(symbol, PERIOD_W1, 0, 2, weekly) < 2) return false;
+      priorHigh = weekly[1].high;
+      priorLow  = weekly[1].low;
+      curHigh   = weekly[0].high;
+      curLow    = weekly[0].low;
+      return (priorHigh > priorLow);
+   }
+
+   bool CheckM15WeeklySweep(const string symbol, const int direction,
+                             const double weeklyLevel, const double sweepBuf,
+                             double &outSweepWick)
+   {
+      outSweepWick = 0.0;
+      MqlRates m15[];
+      ArraySetAsSeries(m15, true);
+      if(CopyRates(symbol, PERIOD_M15, 1, 1, m15) < 1) return false;
+
+      if(direction == STRAT_DIR_BUY)
+      {
+         if(m15[0].low  <  weeklyLevel             &&
+            m15[0].low  >= weeklyLevel - sweepBuf  &&
+            m15[0].close >  weeklyLevel)
+         { outSweepWick = m15[0].low; return true; }
+      }
+      else
+      {
+         if(m15[0].high >  weeklyLevel             &&
+            m15[0].high <= weeklyLevel + sweepBuf  &&
+            m15[0].close <  weeklyLevel)
+         { outSweepWick = m15[0].high; return true; }
+      }
+      return false;
+   }
+
+   int GetM15StochCrossDir(const string symbol,
+                            const int kP, const int dP, const int slowing,
+                            const double oversold, const double overbought)
+   {
+      int h = iStochastic(symbol, PERIOD_M15, kP, dP, slowing, MODE_SMA, STO_LOWHIGH);
+      if(h == INVALID_HANDLE) return 0;
+      double kBuf[], dBuf[];
       ArraySetAsSeries(kBuf, true);
       ArraySetAsSeries(dBuf, true);
-      bool ok = (CopyBuffer(h, 0, 1, 3, kBuf) >= 3 &&
-                 CopyBuffer(h, 1, 1, 3, dBuf) >= 3);
+      bool ok = (CopyBuffer(h, 0, 1, 2, kBuf) >= 2 &&
+                 CopyBuffer(h, 1, 1, 2, dBuf) >= 2);
       IndicatorRelease(h);
-      if(!ok) return false;
-
-      outK     = kBuf[0];  // bar 1 (last closed)
-      outKPrev = kBuf[1];  // bar 2
-      outD     = dBuf[0];
-      outDPrev = dBuf[1];
-      return true;
-   }
-
-   //──────────────────────────────────────────────────────────────────────────
-   // Read RSI from the last two closed 1M bars.
-   //──────────────────────────────────────────────────────────────────────────
-   bool GetRsiValues(const string symbol, const int period,
-                     double &outCur, double &outPrev)
-   {
-      outCur = outPrev = 0.0;
-      int h = iRSI(symbol, PERIOD_M1, period, PRICE_CLOSE);
-      if(h == INVALID_HANDLE) return false;
-
-      double buf[3];
-      ArraySetAsSeries(buf, true);
-      bool ok = (CopyBuffer(h, 0, 1, 3, buf) >= 3);
-      IndicatorRelease(h);
-      if(!ok) return false;
-
-      outCur  = buf[0];  // bar 1
-      outPrev = buf[1];  // bar 2
-      return true;
-   }
-
-   //──────────────────────────────────────────────────────────────────────────
-   // Build the 5M structural box from the last N closed 5M bars.
-   // Box high = highest high, Box low = lowest low.
-   //──────────────────────────────────────────────────────────────────────────
-   bool GetM5RangeBox(const string symbol, const int lookback,
-                      double &outHigh, double &outLow)
-   {
-      outHigh = outLow = 0.0;
-      MqlRates rates[];
-      ArraySetAsSeries(rates, true);
-      if(CopyRates(symbol, PERIOD_M5, 1, lookback, rates) < lookback)
-         return false;
-
-      outHigh = rates[0].high;
-      outLow  = rates[0].low;
-      for(int i = 1; i < lookback; i++)
-      {
-         if(rates[i].high > outHigh) outHigh = rates[i].high;
-         if(rates[i].low  < outLow)  outLow  = rates[i].low;
-      }
-      return true;
-   }
-
-   //──────────────────────────────────────────────────────────────────────────
-   // Setup A BUY trigger:
-   //   Stochastic K was in the oversold zone on the previous closed bar AND
-   //   K has now crossed above D (bullish K/D cross).
-   //──────────────────────────────────────────────────────────────────────────
-   bool StochCrossedUpFromOversold(const double k,     const double kPrev,
-                                   const double d,     const double dPrev,
-                                   const double oversold)
-   {
-      return (kPrev <= oversold &&   // was in oversold on previous bar
-              kPrev <= dPrev   &&   // K was below D (confirming oversold pressure)
-              k > d);               // K has now crossed above D (bullish cross)
-   }
-
-   //──────────────────────────────────────────────────────────────────────────
-   // Setup A SELL trigger:
-   //   Stochastic K was in the overbought zone on the previous closed bar AND
-   //   K has now crossed below D (bearish K/D cross).
-   //──────────────────────────────────────────────────────────────────────────
-   bool StochCrossedDownFromOverbought(const double k,    const double kPrev,
-                                       const double d,    const double dPrev,
-                                       const double overbought)
-   {
-      return (kPrev >= overbought &&  // was in overbought on previous bar
-              kPrev >= dPrev     &&  // K was above D (confirming overbought pressure)
-              k < d);               // K has now crossed below D (bearish cross)
+      if(!ok) return 0;
+      if(kBuf[1] <= oversold  && kBuf[1] <= dBuf[1] && kBuf[0] > dBuf[0]) return  1;
+      if(kBuf[1] >= overbought && kBuf[1] >= dBuf[1] && kBuf[0] < dBuf[0]) return -1;
+      return 0;
    }
 
 public:
+
    //──────────────────────────────────────────────────────────────────────────
-   // Evaluate
-   // Reads all indicators and applies the two master setups + invalidation rules.
-   // Returns true on successful evaluation (signal may still be SETUP_NONE).
+   // Evaluate – main signal engine
+   // Returns true on success (even if no signal found).
+   // outSig.setupType == SETUP_NONE means no trade.
    //──────────────────────────────────────────────────────────────────────────
-   bool Evaluate(const string symbol, const StrategyParams &p,
-                 StrategySignal &outSig)
+   bool Evaluate(const string symbol, const StrategyParams &p, StrategySignal &outSig)
    {
-      // Initialise output
-      outSig.setupType    = SETUP_NONE;
-      outSig.direction    = STRAT_DIR_NONE;
-      outSig.adx1M        = 0.0;
-      outSig.adx1MPrev    = 0.0;
-      outSig.adxHooking   = false;
-      outSig.adx5M        = 0.0;
-      outSig.stochK       = 0.0;
-      outSig.stochKPrev   = 0.0;
-      outSig.stochD       = 0.0;
-      outSig.rsiCur       = 0.0;
-      outSig.rsiPrev      = 0.0;
-      outSig.boxHigh      = 0.0;
-      outSig.boxLow       = 0.0;
-      outSig.signalBarHigh = 0.0;
-      outSig.signalBarLow  = 0.0;
-      outSig.details      = "";
+      // ── Reset output ─────────────────────────────────────────────────────
+      outSig.setupType          = SETUP_NONE;
+      outSig.direction          = STRAT_DIR_NONE;
+      outSig.details            = "";
+      outSig.suggestedSL        = 0.0;
+      outSig.suggestedTP        = 0.0;
+      outSig.keyLevel           = 0.0;
+      outSig.signalBarHigh      = 0.0;
+      outSig.signalBarLow       = 0.0;
+      outSig.h4Bias             = 0;
+      outSig.wickSweepConfirmed = false;
+      outSig.sweepWickLow       = 0.0;
+      outSig.sweepWickHigh      = 0.0;
 
-      // ── Read all indicators ───────────────────────────────────────────────
-      double adx1M, adx1MPrev, adx5M, adx5MPrev;
-      bool   adxHooking1M, adxHooking5M;
+      // ── H4 EMA bias (shared gate) ─────────────────────────────────────────
+      int h4Bias = 0;
+      GetH4EMATrend(symbol, p.h4EmaFast, p.h4EmaSlow, h4Bias);
+      outSig.h4Bias = h4Bias;
 
-      if(!GetAdxState(symbol, PERIOD_M1, p.adxPeriod, adx1M, adx1MPrev, adxHooking1M))
-         return false;
-      if(!GetAdxState(symbol, PERIOD_M5, p.adxPeriod, adx5M, adx5MPrev, adxHooking5M))
-         return false;
-
-      double stochK, stochKPrev, stochD, stochDPrev;
-      if(!GetStochKD(symbol, p.stochKPeriod, p.stochDPeriod, p.stochSlowing,
-                     stochK, stochKPrev, stochD, stochDPrev))
-         return false;
-
-      double rsiCur, rsiPrev;
-      if(!GetRsiValues(symbol, p.rsiPeriod, rsiCur, rsiPrev))
-         return false;
-
-      double boxHigh, boxLow;
-      if(!GetM5RangeBox(symbol, p.m5RangeLookback, boxHigh, boxLow))
-         return false;
-
-      // Populate output fields so caller/logger can read raw indicator values
-      outSig.adx1M      = adx1M;
-      outSig.adx1MPrev  = adx1MPrev;
-      outSig.adxHooking = adxHooking1M;
-      outSig.adx5M      = adx5M;
-      outSig.stochK     = stochK;
-      outSig.stochKPrev = stochKPrev;
-      outSig.stochD     = stochD;
-      outSig.rsiCur     = rsiCur;
-      outSig.rsiPrev    = rsiPrev;
-      outSig.boxHigh    = boxHigh;
-      outSig.boxLow     = boxLow;
-
-      // Signal bar (bar[1]) OHLC – used by the EA to place SL just beyond the sweep wick
-      MqlRates bar1[1];
-      ArraySetAsSeries(bar1, true);
-      if(CopyRates(symbol, PERIOD_M1, 1, 1, bar1) == 1)
+      // ── Capture the last closed M15 bar for SL anchoring ─────────────────
       {
-         outSig.signalBarHigh = bar1[0].high;
-         outSig.signalBarLow  = bar1[0].low;
-      }
-
-      // ── Invalidation Gate ─────────────────────────────────────────────────
-      // "If 1M/5M ADX is going 25→30→35 aggressively, we wait."
-      // Applies to Setups A and B only; Setup C uses Stoch-only entry and
-      // is intentionally unrestricted, so the gate is skipped when only C is active.
-      bool adxExpanding = (adx1M >= p.adxExpandingMin &&
-                           adx1M <= p.adxExpandingMax &&
-                           adx1M > adx1MPrev);
-      if(adxExpanding && (p.setupAEnabled || p.setupBEnabled))
-      {
-         outSig.details = StringFormat(
-            "INVALIDATED – 1M ADX expanding %.1f -> %.1f (zone %.0f-%.0f)",
-            adx1MPrev, adx1M, p.adxExpandingMin, p.adxExpandingMax);
-         return true;  // valid evaluation; signal remains SETUP_NONE
-      }
-
-      // Stochastic extreme flag – required by Setup A and B but NOT by Setup C.
-      bool stochAtExtreme = (stochKPrev <= p.stochOversold ||
-                             stochKPrev >= p.stochOverbought);
-
-      // ── SETUP A: "The Rubber Band" ────────────────────────────────────────
-      // Context : 1M ADX screaming high (> exhaustion level) AND hooking down.
-      // Trigger : Stochastic crosses from extreme + RSI confirms curl-back.
-      if(p.setupAEnabled && adx1M > p.adxExhaustionLevel && adxHooking1M && stochAtExtreme)
-      {
-         // BUY: Stoch crossed UP from oversold  +  RSI was < 30 and is curling up
-         if(StochCrossedUpFromOversold(stochK, stochKPrev, stochD, stochDPrev,
-                                       p.stochOversold) &&
-            rsiPrev < p.rsiOversold &&
-            rsiCur  > rsiPrev)
+         MqlRates m15b[];
+         ArraySetAsSeries(m15b, true);
+         if(CopyRates(symbol, PERIOD_M15, 1, 1, m15b) == 1)
          {
-            outSig.setupType = SETUP_RUBBER_BAND;
-            outSig.direction = STRAT_DIR_BUY;
-            outSig.details   = StringFormat(
-               "SETUP A BUY | adx1M=%.1f(hook) stochK %.1f<-%.1f rsi %.1f<-%.1f",
-               adx1M, stochK, stochKPrev, rsiCur, rsiPrev);
-            return true;
-         }
-
-         // SELL: Stoch crossed DOWN from overbought  +  RSI was > 70 and curling down
-         if(StochCrossedDownFromOverbought(stochK, stochKPrev, stochD, stochDPrev,
-                                           p.stochOverbought) &&
-            rsiPrev > p.rsiOverbought &&
-            rsiCur  < rsiPrev)
-         {
-            outSig.setupType = SETUP_RUBBER_BAND;
-            outSig.direction = STRAT_DIR_SELL;
-            outSig.details   = StringFormat(
-               "SETUP A SELL | adx1M=%.1f(hook) stochK %.1f<-%.1f rsi %.1f<-%.1f",
-               adx1M, stochK, stochKPrev, rsiCur, rsiPrev);
-            return true;
+            outSig.signalBarHigh = m15b[0].high;
+            outSig.signalBarLow  = m15b[0].low;
          }
       }
 
-      // ── SETUP B: "The Range Scalp" ────────────────────────────────────────
-      // Context : 5M ADX is dead (< ranging threshold) – market is sideways.
-      // Trigger : Price touches edge of 5M structural box + Stoch cross from extreme.
-      if(p.setupBEnabled && adx5M < p.adxRangingThreshold && stochAtExtreme)
+      // ── Current UTC hour for session gating ──────────────────────────────
+      MqlDateTime gmtDT;
+      TimeToStruct(TimeGMT(), gmtDT);
+      int gmtHour = gmtDT.hour;
+
+      // ═════════════════════════════════════════════════════════════════════
+      // SETUP A – London Liquidity Sweep
+      // Only fires during the London open window (07:00–10:00 UTC).
+      // H4 bias: neutral or aligned (not strongly opposing).
+      // ═════════════════════════════════════════════════════════════════════
+      if(p.setupAEnabled && outSig.setupType == SETUP_NONE)
       {
-         MqlTick tick;
-         if(!SymbolInfoTick(symbol, tick)) return false;
-         double midPrice = (tick.ask + tick.bid) * 0.5;
-
-         double boxRange = boxHigh - boxLow;
-         if(boxRange > 0.0)
+         bool inLondonWindow = (gmtHour >= p.londonStartHour && gmtHour < p.londonEndHour);
+         if(inLondonWindow)
          {
-            double tolerance = boxRange * p.boxTouchTolerancePct;
-
-            // BUY: price touching / near the BOTTOM of the box
-            if(midPrice <= boxLow + tolerance &&
-               StochCrossedUpFromOversold(stochK, stochKPrev, stochD, stochDPrev,
-                                          p.stochOversold))
+            double asianHigh = 0.0, asianLow = 0.0;
+            if(GetAsianRangeHL(symbol, p.asianStartHour, p.asianEndHour, asianHigh, asianLow))
             {
-               outSig.setupType = SETUP_RANGE_SCALP;
-               outSig.direction = STRAT_DIR_BUY;
-               outSig.details   = StringFormat(
-                  "SETUP B BUY | adx5M=%.1f price=%.5f boxLow=%.5f stochK=%.1f",
-                  adx5M, midPrice, boxLow, stochK);
-               return true;
-            }
+               if((asianHigh - asianLow) >= p.setupAMinRange)
+               {
+                  double sweepWick = 0.0;
 
-            // SELL: price touching / near the TOP of the box
-            if(midPrice >= boxHigh - tolerance &&
-               StochCrossedDownFromOverbought(stochK, stochKPrev, stochD, stochDPrev,
-                                              p.stochOverbought))
-            {
-               outSig.setupType = SETUP_RANGE_SCALP;
-               outSig.direction = STRAT_DIR_SELL;
-               outSig.details   = StringFormat(
-                  "SETUP B SELL | adx5M=%.1f price=%.5f boxHigh=%.5f stochK=%.1f",
-                  adx5M, midPrice, boxHigh, stochK);
-               return true;
+                  // BUY: sweep of Asian low (stop-hunt below, reversal long)
+                  if(h4Bias >= 0 &&
+                     CheckLondonSweep(symbol, STRAT_DIR_BUY,
+                                      asianHigh, asianLow, p.setupASweepBuf, sweepWick))
+                  {
+                     outSig.setupType          = SETUP_LONDON_SWEEP;
+                     outSig.direction          = STRAT_DIR_BUY;
+                     outSig.keyLevel           = asianLow;
+                     outSig.wickSweepConfirmed = true;
+                     outSig.sweepWickLow       = sweepWick;
+                     outSig.suggestedSL        = sweepWick;          // EA adds buffer
+                     outSig.suggestedTP        = asianHigh;          // Opposite Asian wall
+                     outSig.details            = StringFormat(
+                        "SETUP A BUY | Asian=[%.5f,%.5f] wick=%.5f h4=%d",
+                        asianLow, asianHigh, sweepWick, h4Bias);
+                  }
+                  // SELL: sweep of Asian high (stop-hunt above, reversal short)
+                  else if(h4Bias <= 0 &&
+                          CheckLondonSweep(symbol, STRAT_DIR_SELL,
+                                           asianHigh, asianLow, p.setupASweepBuf, sweepWick))
+                  {
+                     outSig.setupType          = SETUP_LONDON_SWEEP;
+                     outSig.direction          = STRAT_DIR_SELL;
+                     outSig.keyLevel           = asianHigh;
+                     outSig.wickSweepConfirmed = true;
+                     outSig.sweepWickHigh      = sweepWick;
+                     outSig.suggestedSL        = sweepWick;
+                     outSig.suggestedTP        = asianLow;
+                     outSig.details            = StringFormat(
+                        "SETUP A SELL | Asian=[%.5f,%.5f] wick=%.5f h4=%d",
+                        asianLow, asianHigh, sweepWick, h4Bias);
+                  }
+               }
             }
          }
       }
 
-      // ── SETUP C: "HFT Range Scalp" – Stochastic-Only, Unrestricted ──────
-      // When InpEnableSetupC is true the EA enters on Stochastic K extreme
-      // alone – no ADX filter, no box proximity, no candle-body gate.
-      // Direction: K ≤ oversold → BUY; K ≥ overbought → SELL.
-      if(p.setupCEnabled)
+      // ═════════════════════════════════════════════════════════════════════
+      // SETUP B – H4 Order Block Retest
+      // Active all sessions.  H4 bias must align.
+      // ═════════════════════════════════════════════════════════════════════
+      if(p.setupBEnabled && outSig.setupType == SETUP_NONE)
       {
-         if(stochK <= p.stochOversold)
-         {
-            outSig.setupType = SETUP_HFT_RANGE_SCALP;
-            outSig.direction = STRAT_DIR_BUY;
-            outSig.details   = StringFormat(
-               "SETUP C BUY | stochK=%.1f(oversold<=%.0f) adx1M=%.1f adx5M=%.1f boxLow=%.5f boxHigh=%.5f",
-               stochK, p.stochOversold, adx1M, adx5M, boxLow, boxHigh);
-            return true;
-         }
+         double obH = 0.0, obL = 0.0;
+         datetime obTime = 0;
 
-         if(stochK >= p.stochOverbought)
+         // BUY – Demand Order Block
+         if(h4Bias >= 0 &&
+            FindH4OrderBlock(symbol, STRAT_DIR_BUY,
+                             p.setupBH4Lookback, p.setupBImpulseFactor,
+                             p.setupBMaxAgeHours, obH, obL, obTime) &&
+            PriceAtOrderBlock(symbol, obH, obL, p.setupBRetestPct) &&
+            IsM15RejectionCandle(symbol, STRAT_DIR_BUY))
          {
-            outSig.setupType = SETUP_HFT_RANGE_SCALP;
-            outSig.direction = STRAT_DIR_SELL;
-            outSig.details   = StringFormat(
-               "SETUP C SELL | stochK=%.1f(overbought>=%.0f) adx1M=%.1f adx5M=%.1f boxLow=%.5f boxHigh=%.5f",
-               stochK, p.stochOverbought, adx1M, adx5M, boxLow, boxHigh);
-            return true;
+            outSig.setupType   = SETUP_ORDER_BLOCK;
+            outSig.direction   = STRAT_DIR_BUY;
+            outSig.keyLevel    = obL;
+            outSig.suggestedSL = obL - (obH - obL) * 0.20; // just below OB body
+            outSig.suggestedTP = 0.0;                        // EA uses RR-based TP
+            outSig.details     = StringFormat(
+               "SETUP B BUY | OB=[%.5f,%.5f] age=%dh h4=%d",
+               obL, obH, (int)((TimeCurrent() - obTime) / 3600), h4Bias);
+         }
+         // SELL – Supply Order Block
+         else if(h4Bias <= 0 &&
+                 FindH4OrderBlock(symbol, STRAT_DIR_SELL,
+                                  p.setupBH4Lookback, p.setupBImpulseFactor,
+                                  p.setupBMaxAgeHours, obH, obL, obTime) &&
+                 PriceAtOrderBlock(symbol, obH, obL, p.setupBRetestPct) &&
+                 IsM15RejectionCandle(symbol, STRAT_DIR_SELL))
+         {
+            outSig.setupType   = SETUP_ORDER_BLOCK;
+            outSig.direction   = STRAT_DIR_SELL;
+            outSig.keyLevel    = obH;
+            outSig.suggestedSL = obH + (obH - obL) * 0.20;
+            outSig.suggestedTP = 0.0;
+            outSig.details     = StringFormat(
+               "SETUP B SELL | OB=[%.5f,%.5f] age=%dh h4=%d",
+               obL, obH, (int)((TimeCurrent() - obTime) / 3600), h4Bias);
          }
       }
 
-      outSig.details = StringFormat(
-         "NO SETUP | adx1M=%.1f(hook=%s) adx5M=%.1f stochK=%.1f rsi=%.1f",
-         adx1M, adxHooking1M ? "Y" : "N", adx5M, stochK, rsiCur);
+      // ═════════════════════════════════════════════════════════════════════
+      // SETUP C – Fair Value Gap Fill (H1 imbalance in H4 trend direction)
+      // ═════════════════════════════════════════════════════════════════════
+      if(p.setupCEnabled && outSig.setupType == SETUP_NONE)
+      {
+         double fvgH = 0.0, fvgL = 0.0;
+
+         if(h4Bias >= 0 &&
+            FindH1FVG(symbol, STRAT_DIR_BUY,
+                      p.setupCH1Lookback, p.setupCMinFVGSize, fvgH, fvgL) &&
+            PriceInFVG(symbol, fvgH, fvgL))
+         {
+            outSig.setupType   = SETUP_FVG_FILL;
+            outSig.direction   = STRAT_DIR_BUY;
+            outSig.keyLevel    = fvgL;
+            outSig.suggestedSL = fvgL - (fvgH - fvgL) * 0.50; // below FVG
+            outSig.suggestedTP = 0.0;
+            outSig.details     = StringFormat(
+               "SETUP C BUY | FVG=[%.5f,%.5f] h4=%d", fvgL, fvgH, h4Bias);
+         }
+         else if(h4Bias <= 0 &&
+                 FindH1FVG(symbol, STRAT_DIR_SELL,
+                           p.setupCH1Lookback, p.setupCMinFVGSize, fvgH, fvgL) &&
+                 PriceInFVG(symbol, fvgH, fvgL))
+         {
+            outSig.setupType   = SETUP_FVG_FILL;
+            outSig.direction   = STRAT_DIR_SELL;
+            outSig.keyLevel    = fvgH;
+            outSig.suggestedSL = fvgH + (fvgH - fvgL) * 0.50;
+            outSig.suggestedTP = 0.0;
+            outSig.details     = StringFormat(
+               "SETUP C SELL | FVG=[%.5f,%.5f] h4=%d", fvgL, fvgH, h4Bias);
+         }
+      }
+
+      // ═════════════════════════════════════════════════════════════════════
+      // SETUP D – Daily Classic Pivot Bounce
+      // H4 alignment required; active sessions only.
+      // ═════════════════════════════════════════════════════════════════════
+      if(p.setupDEnabled && outSig.setupType == SETUP_NONE)
+      {
+         double pp = 0, r1 = 0, r2 = 0, s1 = 0, s2 = 0;
+         if(GetDailyPivots(symbol, pp, r1, r2, s1, s2))
+         {
+            // Level table: {price, direction, TP target}
+            double levels[5]    = { s2,  s1,   pp,  r1,  r2 };
+            int    dirs[5]      = { STRAT_DIR_BUY, STRAT_DIR_BUY, STRAT_DIR_NONE,
+                                    STRAT_DIR_SELL, STRAT_DIR_SELL };
+            double tpTargets[5] = { s1,  pp,  0.0,  pp,  r1 };
+
+            for(int i = 0; i < 5; i++)
+            {
+               int pDir = dirs[i];
+               // PP direction depends on H4 bias
+               if(i == 2) pDir = (h4Bias > 0) ? STRAT_DIR_BUY :
+                                 (h4Bias < 0) ? STRAT_DIR_SELL : STRAT_DIR_NONE;
+               if(pDir == STRAT_DIR_NONE) continue;
+               // H4 alignment gate for support/resistance pivots
+               if(h4Bias > 0 && pDir == STRAT_DIR_SELL) continue;
+               if(h4Bias < 0 && pDir == STRAT_DIR_BUY)  continue;
+
+               if(CheckPivotBounce(symbol, pDir, levels[i], p.setupDPivotTolerance))
+               {
+                  outSig.setupType   = SETUP_PIVOT_BOUNCE;
+                  outSig.direction   = pDir;
+                  outSig.keyLevel    = levels[i];
+                  outSig.suggestedSL = (pDir == STRAT_DIR_BUY)
+                                       ? levels[i] - p.setupDPivotTolerance * 3.0
+                                       : levels[i] + p.setupDPivotTolerance * 3.0;
+                  outSig.suggestedTP = (tpTargets[i] > 0.0) ? tpTargets[i] : 0.0;
+                  outSig.details     = StringFormat(
+                     "SETUP D %s | pivot=%.5f pp=%.5f r1=%.5f s1=%.5f h4=%d",
+                     pDir == STRAT_DIR_BUY ? "BUY" : "SELL",
+                     levels[i], pp, r1, s1, h4Bias);
+                  break;
+               }
+            }
+         }
+      }
+
+      // ═════════════════════════════════════════════════════════════════════
+      // SETUP E – Market Structure Shift (MSS) Retest
+      // Finds H1 BOS → waits for retest of the broken level with M15 rejection.
+      // H4 alignment required.
+      // ═════════════════════════════════════════════════════════════════════
+      if(p.setupEEnabled && outSig.setupType == SETUP_NONE)
+      {
+         double mssLevel = 0.0;
+
+         if(h4Bias >= 0 &&
+            FindH1MSS(symbol, STRAT_DIR_BUY, p.setupESwingLookback, mssLevel) &&
+            CheckMSSRetest(symbol, STRAT_DIR_BUY, mssLevel, p.setupERetestBuffer) &&
+            IsM15RejectionCandle(symbol, STRAT_DIR_BUY))
+         {
+            outSig.setupType   = SETUP_MSS_RETEST;
+            outSig.direction   = STRAT_DIR_BUY;
+            outSig.keyLevel    = mssLevel;
+            outSig.suggestedSL = mssLevel - p.setupERetestBuffer * 2.5;
+            outSig.suggestedTP = 0.0;
+            outSig.details     = StringFormat(
+               "SETUP E BUY | mssLevel=%.5f h4=%d", mssLevel, h4Bias);
+         }
+         else if(h4Bias <= 0 &&
+                 FindH1MSS(symbol, STRAT_DIR_SELL, p.setupESwingLookback, mssLevel) &&
+                 CheckMSSRetest(symbol, STRAT_DIR_SELL, mssLevel, p.setupERetestBuffer) &&
+                 IsM15RejectionCandle(symbol, STRAT_DIR_SELL))
+         {
+            outSig.setupType   = SETUP_MSS_RETEST;
+            outSig.direction   = STRAT_DIR_SELL;
+            outSig.keyLevel    = mssLevel;
+            outSig.suggestedSL = mssLevel + p.setupERetestBuffer * 2.5;
+            outSig.suggestedTP = 0.0;
+            outSig.details     = StringFormat(
+               "SETUP E SELL | mssLevel=%.5f h4=%d", mssLevel, h4Bias);
+         }
+      }
+
+      // ═════════════════════════════════════════════════════════════════════
+      // SETUP F – Weekly High/Low Sniper (20-pip challenge)
+      // Most selective setup: fires only 2–3 times/week on perfect alignment.
+      // ═════════════════════════════════════════════════════════════════════
+      if(p.setupFEnabled && outSig.setupType == SETUP_NONE)
+      {
+         double priorHigh = 0, priorLow = 0, curHigh = 0, curLow = 0;
+         if(GetWeeklyHighLow(symbol, priorHigh, priorLow, curHigh, curLow))
+         {
+            int    fDir        = STRAT_DIR_NONE;
+            double wklyLevel   = 0.0;
+            double sweepWick   = 0.0;
+
+            double sw = 0.0;
+            if(CheckM15WeeklySweep(symbol, STRAT_DIR_BUY,
+                                   priorLow, p.setupFWeeklySweepBuf, sw))
+            { fDir = STRAT_DIR_BUY; wklyLevel = priorLow; sweepWick = sw; }
+
+            if(fDir == STRAT_DIR_NONE)
+            {
+               if(CheckM15WeeklySweep(symbol, STRAT_DIR_SELL,
+                                      priorHigh, p.setupFWeeklySweepBuf, sw))
+               { fDir = STRAT_DIR_SELL; wklyLevel = priorHigh; sweepWick = sw; }
+            }
+
+            if(fDir != STRAT_DIR_NONE)
+            {
+               bool h4Ok = true;
+               if(p.setupFRequireH4Align)
+                  h4Ok = (fDir == STRAT_DIR_BUY ? h4Bias >= 0 : h4Bias <= 0);
+
+               bool m15Ok = true;
+               if(p.setupFRequireM15Stoch)
+               {
+                  int crossDir = GetM15StochCrossDir(symbol,
+                                                     p.stochKPeriod, p.stochDPeriod,
+                                                     p.stochSlowing,
+                                                     p.stochOversold, p.stochOverbought);
+                  m15Ok = (crossDir == fDir);
+               }
+
+               if(h4Ok && m15Ok)
+               {
+                  outSig.setupType          = SETUP_WEEKLY_PRECISION;
+                  outSig.direction          = fDir;
+                  outSig.keyLevel           = wklyLevel;
+                  outSig.wickSweepConfirmed = true;
+                  if(fDir == STRAT_DIR_BUY) outSig.sweepWickLow  = sweepWick;
+                  else                       outSig.sweepWickHigh = sweepWick;
+                  outSig.suggestedSL = sweepWick; // EA adds buffer
+                  outSig.suggestedTP = 0.0;        // EA uses fixed pip target
+                  outSig.details = StringFormat(
+                     "SETUP F %s | wklyLevel=%.5f wick=%.5f h4=%d h4ok=%s m15ok=%s",
+                     fDir == STRAT_DIR_BUY ? "BUY" : "SELL",
+                     wklyLevel, sweepWick, h4Bias,
+                     h4Ok ? "Y" : "N", m15Ok ? "Y" : "N");
+               }
+            }
+         }
+      }
+
+      // ── No setup ─────────────────────────────────────────────────────────
+      if(outSig.setupType == SETUP_NONE)
+         outSig.details = StringFormat("NO SETUP | h4=%d utcHour=%d", h4Bias, gmtHour);
+
       return true;
    }
 
    //──────────────────────────────────────────────────────────────────────────
-   // ShouldExit
-   // Returns true when momentum conditions justify closing a profitable trade.
-   //   • 1M ADX dropped below the weak-exit threshold  (trend is dying)
-   //   • Opposite Stochastic cross from extreme         (momentum reversed)
+   // ShouldExit – dynamic exit condition
+   // Returns true when the H4 EMA flips against the trade direction.
    //──────────────────────────────────────────────────────────────────────────
-   bool ShouldExit(const string symbol, const int positionDirection,
-                   const StrategyParams &p)
+   bool ShouldExit(const string symbol, const int posDir, const StrategyParams &p)
    {
-      // ADX weak-exit
-      double adx1M, adx1MPrev;
-      bool   adxHooking;
-      if(GetAdxState(symbol, PERIOD_M1, p.adxPeriod, adx1M, adx1MPrev, adxHooking))
+      int h4Bias = 0;
+      if(GetH4EMATrend(symbol, p.h4EmaFast, p.h4EmaSlow, h4Bias))
       {
-         if(adx1M < p.adxExitWeakThreshold)
-            return true;
+         if(posDir == STRAT_DIR_BUY  && h4Bias < 0) return true;
+         if(posDir == STRAT_DIR_SELL && h4Bias > 0) return true;
       }
-
-      // Opposite Stochastic cross from extreme
-      double k, kPrev, d, dPrev;
-      if(GetStochKD(symbol, p.stochKPeriod, p.stochDPeriod, p.stochSlowing,
-                    k, kPrev, d, dPrev))
-      {
-         if(positionDirection == STRAT_DIR_BUY &&
-            StochCrossedDownFromOverbought(k, kPrev, d, dPrev, p.stochOverbought))
-            return true;
-
-         if(positionDirection == STRAT_DIR_SELL &&
-            StochCrossedUpFromOversold(k, kPrev, d, dPrev, p.stochOversold))
-            return true;
-      }
-
       return false;
    }
 };

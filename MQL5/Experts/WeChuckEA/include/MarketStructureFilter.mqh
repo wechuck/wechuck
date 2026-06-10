@@ -23,7 +23,7 @@ public:
          return false;
       }
 
-      double fastBuf[2], slowBuf[2];
+      double fastBuf[], slowBuf[];
       ArraySetAsSeries(fastBuf, true);
       ArraySetAsSeries(slowBuf, true);
       if(CopyBuffer(emaFast, 0, 1, 2, fastBuf) < 2 || CopyBuffer(emaSlow, 0, 1, 2, slowBuf) < 2)
